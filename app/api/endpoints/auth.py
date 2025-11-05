@@ -148,7 +148,12 @@ async def register(
     await db.commit()
     await db.refresh(new_user)
     
-    return UserResponse.model_validate(new_user)
+    # Load clinic information to avoid lazy loading issues
+    query = select(User).options(selectinload(User.clinic)).where(User.id == new_user.id)
+    result = await db.execute(query)
+    user_with_clinic = result.scalar_one()
+    
+    return UserResponse.model_validate(user_with_clinic)
 
 
 @router.get("/me", response_model=UserResponse)

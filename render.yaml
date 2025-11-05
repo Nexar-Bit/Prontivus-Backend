@@ -22,10 +22,10 @@ services:
       - key: DEBUG
         value: "false"
       - key: BACKEND_CORS_ORIGINS
-        # Add your frontend URL(s) here, comma-separated
-        # Example: https://prontivus.vercel.app,https://www.prontivus.com
-        # IMPORTANT: Set this manually in Render dashboard after deployment
-        value: ""
+        # Frontend URL(s) - comma-separated
+        # IMPORTANT: This should be set in Render dashboard Environment Variables
+        # For production: https://prontivus-f-pplm.vercel.app
+        value: "https://prontivus-f-pplm.vercel.app"
       - key: PYTHON_VERSION
         value: 3.12.0
 

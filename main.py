@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 import traceback
 import os
+import json
 
 # Import API routers
 from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config, messages
@@ -182,11 +183,41 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     else:
         headers = {}
     
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": exc.errors()},
-        headers=headers
-    )
+    # Convert errors to serializable format
+    def make_serializable(obj):
+        """Recursively convert non-serializable objects to strings"""
+        if isinstance(obj, (Exception, BaseException)):
+            return str(obj)
+        elif isinstance(obj, dict):
+            return {k: make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [make_serializable(item) for item in obj]
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        else:
+            # Try to serialize, if fails convert to string
+            try:
+                json.dumps(obj)
+                return obj
+            except (TypeError, ValueError):
+                return str(obj)
+    
+    try:
+        errors = exc.errors()
+        serializable_errors = [make_serializable(error) for error in errors]
+        
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"detail": serializable_errors},
+            headers=headers
+        )
+    except Exception as e:
+        # Fallback: return a simple error message if serialization fails
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"detail": [{"msg": "Validation error", "type": "value_error"}]},
+            headers=headers
+        )
 
 # Include API routers
 # Note: Register clinical router BEFORE appointments router to ensure
