@@ -8,7 +8,7 @@ over appointments, invoices, stock tables as needed.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Dict, Any
 import traceback
 import logging
 import re
@@ -823,6 +823,70 @@ async def export_clinical_pdf(
     return Response(content=pdf, media_type="application/pdf", headers=headers)
 
 
+@router.get("/export/dashboard/excel")
+async def export_dashboard_excel(
+    period: str = Query("last_30_days", description="Time period for dashboard export"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Export comprehensive dashboard data to Excel.
+    Includes all key metrics: patients, appointments, revenue, satisfaction, etc.
+    """
+    try:
+        # Get dashboard stats
+        stats = await get_dashboard_stats(current_user, db)
+        
+        # Get additional analytics data
+        clinical_data = await get_clinical_analytics(period, current_user, db)
+        
+        # Prepare comprehensive export data
+        export_data: Dict[str, Any] = {}
+        export_data["Período"] = period
+        export_data["Data de Exportação"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        export_data["Clínica"] = current_user.clinic.name if getattr(current_user, 'clinic', None) else "N/A"
+        export_data[" "] = " "  # Spacer
+        export_data["=== MÉTRICAS PRINCIPAIS ==="] = " "
+        export_data["Pacientes Ativos"] = stats["patients"]["value"]
+        export_data["Variação Pacientes (%)"] = f"{stats['patients']['change']:+.1f}%"
+        export_data["Agendamentos Este Mês"] = stats["appointments"]["value"]
+        export_data["Variação Agendamentos (%)"] = f"{stats['appointments']['change']:+.1f}%"
+        export_data["Receita Mensal (R$)"] = f"{stats['revenue']['value']:,.2f}"
+        export_data["Variação Receita (%)"] = f"{stats['revenue']['change']:+.1f}%"
+        export_data["Satisfação dos Pacientes"] = f"{stats['satisfaction']['value']:.1f}%"
+        export_data["Agendamentos Hoje"] = stats["today_appointments"]["value"]
+        export_data["Resultados Pendentes"] = stats["pending_results"]["value"]
+        export_data["  "] = " "  # Spacer
+        export_data["=== DADOS CLÍNICOS ==="] = " "
+        export_data["Total de Diagnósticos"] = len(clinical_data.get("top_diagnoses", []))
+        export_data["Consultas por Status"] = len(clinical_data.get("appointments_by_status", []))
+        
+        # Add top diagnoses
+        if clinical_data.get("top_diagnoses"):
+            export_data["   "] = " "  # Spacer
+            export_data["=== TOP 10 DIAGNÓSTICOS ==="] = " "
+            for idx, diag in enumerate(clinical_data["top_diagnoses"][:10], 1):
+                export_data[f"{idx}. {diag.get('icd10_code', 'N/A')}"] = f"{diag.get('description', 'N/A')} ({diag.get('count', 0)} casos)"
+        
+        # Add appointments by status
+        if clinical_data.get("appointments_by_status"):
+            export_data["    "] = " "  # Spacer
+            export_data["=== AGENDAMENTOS POR STATUS ==="] = " "
+            for status_item in clinical_data["appointments_by_status"]:
+                export_data[status_item.get("status", "N/A")] = status_item.get("count", 0)
+        
+        xls = generate_analytics_excel("Relatório do Dashboard", export_data)
+        filename = f"dashboard_{period}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
+        headers = {"Content-Disposition": f"attachment; filename={filename}"}
+        return Response(content=xls, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
+    except Exception as e:
+        logger.error(f"Error exporting dashboard: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error exporting dashboard: {str(e)}"
+        )
+
+
 @router.get("/export/financial/excel")
 async def export_financial_excel(
     period: str = Query("last_month"),
@@ -831,7 +895,8 @@ async def export_financial_excel(
 ):
     data = await get_financial_analytics(period, current_user, db)
     xls = generate_analytics_excel("Relatório Financeiro", data)
-    headers = {"Content-Disposition": f"attachment; filename=financial_{period}.xlsx"}
+    filename = f"financial_{period}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
+    headers = {"Content-Disposition": f"attachment; filename={filename}"}
     return Response(content=xls, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
 
 

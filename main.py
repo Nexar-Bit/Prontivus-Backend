@@ -16,6 +16,10 @@ from app.api.endpoints import icd10
 from app.core.middleware import SecurityMiddleware, AuthenticationMiddleware, SecurityHeadersMiddleware, LoginAttemptMiddleware
 from app.middleware.licensing import licensing_middleware
 
+# Import monitoring and caching
+from app.core.monitoring import init_sentry
+from app.core.cache import cache_manager
+
 # Get CORS origins from environment variable
 def get_cors_origins():
     """Get CORS origins from environment variable or use defaults"""
@@ -33,12 +37,23 @@ def get_cors_origins():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
-    # Startup: Can add database initialization here
-    # For now, database tables should be created via Alembic migrations
-    print("🚀 CliniCore API starting up...")
+    # Startup: Initialize monitoring and caching
+    print("🚀 Prontivus API starting up...")
+    
+    # Initialize Sentry for error tracking
+    if init_sentry():
+        print("✅ Sentry monitoring initialized")
+    
+    # Connect to Redis cache
+    await cache_manager.connect()
+    if cache_manager.enabled:
+        print("✅ Redis cache connected")
+    
     yield
+    
     # Shutdown: Close connections
-    print("👋 CliniCore API shutting down...")
+    await cache_manager.disconnect()
+    print("👋 Prontivus API shutting down...")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -219,33 +234,62 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             headers=headers
         )
 
-# Include API routers
+# Include API routers with versioning
+# API Version 1 - All endpoints under /api/v1
 # Note: Register clinical router BEFORE appointments router to ensure
 # specific routes like /appointments/{id}/clinical-record are matched correctly
-app.include_router(auth.router, prefix="/api")
-app.include_router(patients.router, prefix="/api")
-app.include_router(clinical.router, prefix="/api")
-app.include_router(appointments.router, prefix="/api")
-app.include_router(users.router, prefix="/api")
-app.include_router(financial.router, prefix="/api/financial")
-app.include_router(tiss.router, prefix="/api")
-app.include_router(tiss_templates.router, prefix="/api/financial")
-app.include_router(tiss_batch.router, prefix="/api")
-app.include_router(stock.router, prefix="/api")
-app.include_router(procedures.router, prefix="/api")
-app.include_router(analytics.router, prefix="/api")
-app.include_router(admin.router, prefix="/api")
-app.include_router(licenses.router, prefix="/api")
-app.include_router(icd10.router, prefix="/api")
-app.include_router(voice.router, prefix="/api")
-app.include_router(migration.router, prefix="/api")
-app.include_router(files.router, prefix="/api")
-app.include_router(patient_calling.router, prefix="/api")
-app.include_router(websocket_calling.router)
-app.include_router(notifications.router, prefix="/api")
-app.include_router(tiss_config.router, prefix="/api/financial")
-app.include_router(user_settings.router, prefix="/api")
-app.include_router(messages.router, prefix="/api")
+API_V1_PREFIX = "/api/v1"
+
+app.include_router(auth.router, prefix=API_V1_PREFIX, tags=["Authentication"])
+app.include_router(patients.router, prefix=API_V1_PREFIX, tags=["Patients"])
+app.include_router(clinical.router, prefix=API_V1_PREFIX, tags=["Clinical"])
+app.include_router(appointments.router, prefix=API_V1_PREFIX, tags=["Appointments"])
+app.include_router(users.router, prefix=API_V1_PREFIX, tags=["Users"])
+app.include_router(financial.router, prefix=f"{API_V1_PREFIX}/financial", tags=["Financial"])
+app.include_router(tiss.router, prefix=API_V1_PREFIX, tags=["TISS"])
+app.include_router(tiss_templates.router, prefix=f"{API_V1_PREFIX}/financial", tags=["TISS Templates"])
+app.include_router(tiss_batch.router, prefix=API_V1_PREFIX, tags=["TISS Batch"])
+app.include_router(stock.router, prefix=API_V1_PREFIX, tags=["Stock"])
+app.include_router(procedures.router, prefix=API_V1_PREFIX, tags=["Procedures"])
+app.include_router(analytics.router, prefix=API_V1_PREFIX, tags=["Analytics"])
+app.include_router(admin.router, prefix=API_V1_PREFIX, tags=["Admin"])
+app.include_router(licenses.router, prefix=API_V1_PREFIX, tags=["Licenses"])
+app.include_router(icd10.router, prefix=API_V1_PREFIX, tags=["ICD-10"])
+app.include_router(voice.router, prefix=API_V1_PREFIX, tags=["Voice"])
+app.include_router(migration.router, prefix=API_V1_PREFIX, tags=["Migration"])
+app.include_router(files.router, prefix=API_V1_PREFIX, tags=["Files"])
+app.include_router(patient_calling.router, prefix=API_V1_PREFIX, tags=["Patient Calling"])
+app.include_router(websocket_calling.router, tags=["WebSocket Calling"])
+app.include_router(notifications.router, prefix=API_V1_PREFIX, tags=["Notifications"])
+app.include_router(tiss_config.router, prefix=f"{API_V1_PREFIX}/financial", tags=["TISS Config"])
+app.include_router(user_settings.router, prefix=API_V1_PREFIX, tags=["User Settings"])
+app.include_router(messages.router, prefix=API_V1_PREFIX, tags=["Messages"])
+
+# Legacy /api routes for backward compatibility (deprecated)
+# TODO: Remove in v2.0.0
+app.include_router(auth.router, prefix="/api", tags=["Authentication (Legacy)"], deprecated=True)
+app.include_router(patients.router, prefix="/api", tags=["Patients (Legacy)"], deprecated=True)
+app.include_router(clinical.router, prefix="/api", tags=["Clinical (Legacy)"], deprecated=True)
+app.include_router(appointments.router, prefix="/api", tags=["Appointments (Legacy)"], deprecated=True)
+app.include_router(users.router, prefix="/api", tags=["Users (Legacy)"], deprecated=True)
+app.include_router(financial.router, prefix="/api/financial", tags=["Financial (Legacy)"], deprecated=True)
+app.include_router(tiss.router, prefix="/api", tags=["TISS (Legacy)"], deprecated=True)
+app.include_router(tiss_templates.router, prefix="/api/financial", tags=["TISS Templates (Legacy)"], deprecated=True)
+app.include_router(tiss_batch.router, prefix="/api", tags=["TISS Batch (Legacy)"], deprecated=True)
+app.include_router(stock.router, prefix="/api", tags=["Stock (Legacy)"], deprecated=True)
+app.include_router(procedures.router, prefix="/api", tags=["Procedures (Legacy)"], deprecated=True)
+app.include_router(analytics.router, prefix="/api", tags=["Analytics (Legacy)"], deprecated=True)
+app.include_router(admin.router, prefix="/api", tags=["Admin (Legacy)"], deprecated=True)
+app.include_router(licenses.router, prefix="/api", tags=["Licenses (Legacy)"], deprecated=True)
+app.include_router(icd10.router, prefix="/api", tags=["ICD-10 (Legacy)"], deprecated=True)
+app.include_router(voice.router, prefix="/api", tags=["Voice (Legacy)"], deprecated=True)
+app.include_router(migration.router, prefix="/api", tags=["Migration (Legacy)"], deprecated=True)
+app.include_router(files.router, prefix="/api", tags=["Files (Legacy)"], deprecated=True)
+app.include_router(patient_calling.router, prefix="/api", tags=["Patient Calling (Legacy)"], deprecated=True)
+app.include_router(notifications.router, prefix="/api", tags=["Notifications (Legacy)"], deprecated=True)
+app.include_router(tiss_config.router, prefix="/api/financial", tags=["TISS Config (Legacy)"], deprecated=True)
+app.include_router(user_settings.router, prefix="/api", tags=["User Settings (Legacy)"], deprecated=True)
+app.include_router(messages.router, prefix="/api", tags=["Messages (Legacy)"], deprecated=True)
 
 @app.get("/")
 async def root():

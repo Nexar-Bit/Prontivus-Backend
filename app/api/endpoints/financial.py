@@ -5,6 +5,8 @@ Financial module API endpoints
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import List, Optional
+import enum
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select, and_, or_
@@ -119,6 +121,35 @@ async def update_service_item(
     await db.commit()
     await db.refresh(db_service_item)
     return db_service_item
+
+
+@router.delete("/service-items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_service_item(
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete a service item
+    Only admins can delete service items
+    """
+    query = select(ServiceItem).filter(
+        and_(
+            ServiceItem.id == item_id,
+            ServiceItem.clinic_id == current_user.clinic_id
+        )
+    )
+    result = await db.execute(query)
+    db_service_item = result.scalar_one_or_none()
+    
+    if not db_service_item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service item not found"
+        )
+    
+    await db.delete(db_service_item)
+    await db.commit()
 
 
 # ==================== Invoices ====================
@@ -638,20 +669,48 @@ async def get_invoice_payments(
             detail="Invoice not found"
         )
     
-    # Get payments
+    # Get payments with creator relationship loaded
     payments_query = select(Payment).options(
         joinedload(Payment.creator)
     ).filter(Payment.invoice_id == invoice_id).order_by(Payment.created_at.desc())
     
     result = await db.execute(payments_query)
-    payments = result.scalars().all()
+    # Use unique() on result to avoid duplicates from joinedload
+    payments = result.unique().scalars().all()
     
-    # Add creator names
+    # Convert to response models with creator_name
+    payment_responses = []
     for payment in payments:
-        if payment.creator:
-            payment.creator_name = payment.creator.full_name
+        try:
+            # Safely get method and status values
+            method_value = payment.method.value if isinstance(payment.method, (PaymentMethod, enum.Enum)) else str(payment.method)
+            status_value = payment.status.value if isinstance(payment.status, (PaymentStatus, enum.Enum)) else str(payment.status)
+            
+            # Safely get creator name
+            creator_name = None
+            if payment.creator:
+                creator_name = getattr(payment.creator, 'full_name', None) or getattr(payment.creator, 'name', None)
+            
+            payment_dict = {
+                "id": payment.id,
+                "invoice_id": payment.invoice_id,
+                "amount": float(payment.amount) if payment.amount else 0.0,
+                "method": method_value,
+                "status": status_value,
+                "reference_number": payment.reference_number,
+                "notes": payment.notes,
+                "paid_at": payment.paid_at,
+                "created_at": payment.created_at,
+                "updated_at": payment.updated_at,
+                "creator_name": creator_name
+            }
+            payment_responses.append(PaymentResponse(**payment_dict))
+        except Exception as e:
+            # Log error but continue processing other payments
+            logging.error(f"Error processing payment {payment.id}: {str(e)}")
+            continue
     
-    return payments
+    return payment_responses
 
 
 @router.post("/payments", response_model=PaymentResponse, status_code=status.HTTP_201_CREATED)

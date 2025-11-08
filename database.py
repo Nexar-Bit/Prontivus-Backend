@@ -7,9 +7,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Get database URL from environment variable
+# CRITICAL: Never hardcode production credentials. Always use environment variables.
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://prontivus_clinic_user:awysfvJWF0oFBmG7zJDCirqw238MjrmT@dpg-d441bemuk2gs739jnde0-a.oregon-postgres.render.com/prontivus_clinic"
+    "postgresql+asyncpg://user:password@localhost:5432/prontivus_clinic"  # Default for local development only
 )
 
 # Create async engine
