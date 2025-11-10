@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import uvicorn
 import traceback
@@ -233,6 +234,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             content={"detail": [{"msg": "Validation error", "type": "value_error"}]},
             headers=headers
         )
+
+# Mount static files for avatars and uploads
+STORAGE_DIR = os.getenv("STORAGE_DIR", "storage")
+if os.path.exists(STORAGE_DIR):
+    app.mount("/storage", StaticFiles(directory=STORAGE_DIR), name="storage")
 
 # Include API routers with versioning
 # API Version 1 - All endpoints under /api/v1

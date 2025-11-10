@@ -313,6 +313,9 @@ from app.models.system_log import SystemLog
 # Import user settings model
 from app.models.user_settings import UserSettings
 
+# Import push subscription model
+from app.models.push_subscription import PushSubscription
+
 # Import message models
 from app.models.message import MessageThread, Message, MessageStatus
 
@@ -371,6 +374,7 @@ __all__ = [
     "TissTemplate",
     "TissTemplateCategory",
     "UserSettings",
+    "PushSubscription",
     "SystemLog",
     "MessageThread",
     "Message",

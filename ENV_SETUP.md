@@ -89,6 +89,39 @@ SMTP_PASSWORD=your-app-password
 SMTP_FROM_EMAIL=noreply@prontivus.com
 ```
 
+### SMS Configuration (for notifications)
+
+```bash
+# SMS Provider (currently supports Twilio)
+SMS_PROVIDER=twilio
+SMS_TWILIO_ACCOUNT_SID=your_twilio_account_sid
+SMS_TWILIO_AUTH_TOKEN=your_twilio_auth_token
+SMS_TWILIO_FROM_NUMBER=+1234567890
+```
+
+**To get Twilio credentials:**
+1. Sign up at https://www.twilio.com (free trial with $15.50 credits)
+2. Get Account SID and Auth Token from Twilio Console dashboard
+3. Purchase or use a trial phone number
+4. See `SMS_SETUP.md` for detailed step-by-step instructions
+
+### Push Notification Configuration (for web push)
+
+```bash
+# Generate VAPID keys using: python generate_vapid_keys.py
+VAPID_PUBLIC_KEY=your-vapid-public-key
+VAPID_PRIVATE_KEY=your-vapid-private-key
+VAPID_EMAIL=mailto:noreply@prontivus.com
+```
+
+**To generate VAPID keys:**
+```bash
+cd backend
+python generate_vapid_keys.py
+```
+
+This will output the keys that you need to add to your `.env` file.
+
 ## Production Setup
 
 ### Render Deployment

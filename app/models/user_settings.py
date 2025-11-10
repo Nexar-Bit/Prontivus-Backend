@@ -20,6 +20,7 @@ class UserSettings(Base):
     
     # Profile Information (can be overridden from User model)
     phone = Column(String(20), nullable=True)
+    avatar_url = Column(String(500), nullable=True)  # URL or path to user avatar image
     
     # Notification Preferences (stored as JSON for flexibility)
     notifications = Column(JSON, nullable=False, default=dict)

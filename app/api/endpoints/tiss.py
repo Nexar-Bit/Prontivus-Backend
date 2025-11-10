@@ -38,6 +38,11 @@ async def get_tiss_xml(
     Returns:
         XML file for download
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"TISS XML endpoint called for invoice {invoice_id} by user {current_user.id}")
+    
     try:
         # Verify invoice exists and user has access
         invoice_query = select(Invoice).options(
@@ -53,6 +58,7 @@ async def get_tiss_xml(
         invoice = invoice_result.unique().scalar_one_or_none()
         
         if not invoice:
+            logger.warning(f"Invoice {invoice_id} not found or access denied for user {current_user.id}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Invoice not found or access denied"
@@ -60,17 +66,65 @@ async def get_tiss_xml(
         
         # Check if user has permission to access this invoice
         if current_user.role not in ["admin", "secretary"]:
+            logger.warning(f"User {current_user.id} with role {current_user.role} attempted to access invoice {invoice_id}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Insufficient permissions to access invoice data"
             )
         
+        # Validate invoice has required data before attempting to generate XML
+        if not invoice.patient:
+            logger.error(f"Invoice {invoice_id} missing patient data")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invoice must have an associated patient to generate TISS XML"
+            )
+        
+        if not invoice.clinic:
+            logger.error(f"Invoice {invoice_id} missing clinic data")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invoice must have an associated clinic to generate TISS XML"
+            )
+        
+        if not invoice.invoice_lines or len(invoice.invoice_lines) == 0:
+            logger.error(f"Invoice {invoice_id} has no invoice lines")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invoice must have at least one invoice line to generate TISS XML"
+            )
+        
+        # Check if invoice lines have service items
+        valid_lines = [line for line in invoice.invoice_lines if line.service_item]
+        if len(valid_lines) == 0:
+            logger.error(f"Invoice {invoice_id} has no invoice lines with service items")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invoice must have at least one invoice line with a service item to generate TISS XML"
+            )
+        
+        # Check if we should skip validation (if data is incomplete, validation will likely fail)
+        # Skip validation if clinic doesn't have valid CNPJ or if using default values
+        should_skip_validation = skip_validation
+        if not should_skip_validation:
+            clinic_cnpj = (invoice.clinic.tax_id or "").replace(".", "").replace("/", "").replace("-", "")
+            # If CNPJ is invalid or default, skip validation
+            # Check if CNPJ is missing, wrong length, all digits same, or default value
+            if (not clinic_cnpj or 
+                len(clinic_cnpj) != 14 or 
+                clinic_cnpj == "00000000000000" or 
+                (len(clinic_cnpj) == 14 and clinic_cnpj == clinic_cnpj[0] * 14)):
+                logger.warning(f"Invoice {invoice_id} has invalid or default CNPJ ({clinic_cnpj}), skipping validation")
+                should_skip_validation = True
+        
         # Generate TISS XML (with optional validation skip)
-        xml_content = await generate_tiss_xml(invoice_id, db, skip_validation=skip_validation)
+        logger.info(f"Generating TISS XML for invoice {invoice_id} (skip_validation={should_skip_validation})")
+        xml_content = await generate_tiss_xml(invoice_id, db, skip_validation=should_skip_validation)
         
         # Return XML file for download
         filename = f"tiss_invoice_{invoice_id:06d}.xml"
         
+        logger.info(f"Successfully generated TISS XML for invoice {invoice_id}")
         return Response(
             content=xml_content,
             media_type="application/xml",
@@ -80,15 +134,20 @@ async def get_tiss_xml(
             }
         )
         
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except ValueError as e:
+        logger.error(f"ValueError generating TISS XML for invoice {invoice_id}: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Não foi possível gerar o XML TISS: {str(e)}"
         )
     except Exception as e:
+        logger.exception(f"Unexpected error generating TISS XML for invoice {invoice_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error generating TISS XML: {str(e)}"
+            detail=f"Erro ao gerar XML TISS: {str(e)}"
         )
 
 

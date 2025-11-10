@@ -54,8 +54,19 @@ async def upload_migration_data(job_id: int, file: UploadFile = File(...), curre
 
 @router.get("/jobs", response_model=list[MigrationJobResponse])
 async def list_jobs(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_async_session)):
-    res = await db.execute(select(MigrationJob).where(MigrationJob.clinic_id == current_user.clinic_id).order_by(MigrationJob.created_at.desc()))
-    return res.scalars().all()
+    try:
+        if not current_user.clinic_id:
+            raise HTTPException(status_code=400, detail="User must be associated with a clinic")
+        
+        res = await db.execute(select(MigrationJob).where(MigrationJob.clinic_id == current_user.clinic_id).order_by(MigrationJob.created_at.desc()))
+        jobs = res.scalars().all()
+        return jobs
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error listing migration jobs: {str(e)}")
 
 
 @router.post("/jobs/{job_id}/rollback", response_model=MigrationJobResponse)

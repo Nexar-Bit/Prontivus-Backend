@@ -36,6 +36,24 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     
+    # Email Settings (optional)
+    SMTP_HOST: Optional[str] = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: Optional[str] = os.getenv("SMTP_USER", None)
+    SMTP_PASSWORD: Optional[str] = os.getenv("SMTP_PASSWORD", None)
+    SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", "noreply@prontivus.com")
+    
+    # Push Notification Settings (optional)
+    VAPID_PUBLIC_KEY: Optional[str] = os.getenv("VAPID_PUBLIC_KEY", None)
+    VAPID_PRIVATE_KEY: Optional[str] = os.getenv("VAPID_PRIVATE_KEY", None)
+    VAPID_EMAIL: str = os.getenv("VAPID_EMAIL", "mailto:noreply@prontivus.com")
+    
+    # SMS Settings (optional)
+    SMS_PROVIDER: str = os.getenv("SMS_PROVIDER", "twilio")
+    SMS_TWILIO_ACCOUNT_SID: Optional[str] = os.getenv("SMS_TWILIO_ACCOUNT_SID", None)
+    SMS_TWILIO_AUTH_TOKEN: Optional[str] = os.getenv("SMS_TWILIO_AUTH_TOKEN", None)
+    SMS_TWILIO_FROM_NUMBER: Optional[str] = os.getenv("SMS_TWILIO_FROM_NUMBER", None)
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

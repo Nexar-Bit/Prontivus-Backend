@@ -3,7 +3,7 @@ Authentication Endpoints
 Handles user authentication, registration, and token management
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -26,6 +26,7 @@ from app.schemas.auth import (
     MessageResponse
 )
 from config import settings
+from app.services.login_alert_service import send_login_alert
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -33,6 +34,7 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 @router.post("/login", response_model=LoginResponse)
 async def login(
     login_data: LoginRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -83,6 +85,27 @@ async def login(
     
     # Prepare user response
     user_response = UserResponse.model_validate(user_with_clinic)
+    
+    # Send login alert (background task, don't wait for it)
+    try:
+        # Get client IP and user agent
+        client_ip = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent")
+        
+        # Send alert in background (don't await)
+        # Use asyncio.create_task to run in background
+        import asyncio
+        asyncio.create_task(send_login_alert(
+            user_id=user.id,
+            login_ip=client_ip,
+            user_agent=user_agent,
+            db=db
+        ))
+    except Exception as e:
+        # Don't fail login if alert fails
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed to send login alert: {str(e)}")
     
     return LoginResponse(
         access_token=access_token,
