@@ -74,7 +74,52 @@ async def run_job(db: AsyncSession, job: MigrationJob, content: bytes) -> Tuple[
         privacy = sum(([privacy_issues(r) for r in records]), [])
         errors = {'duplicates': dups[:100], 'missing': miss, 'privacy': privacy[:100]}
         imported = len(records)
-        # TODO: Persist into Patient table in batches and map IDs
+        # Persist into Patient table in batches and map IDs
+        # This ensures efficient database operations and proper ID mapping
+        from app.models import Patient
+        batch_size = 100
+        imported_patients = []
+        
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            patient_objects = []
+            
+            for record in batch:
+                # Create Patient object from record
+                patient = Patient(
+                    first_name=record.get('first_name', ''),
+                    last_name=record.get('last_name', ''),
+                    date_of_birth=record.get('date_of_birth'),
+                    gender=record.get('gender', 'other'),
+                    cpf=record.get('cpf', ''),
+                    phone=record.get('phone', ''),
+                    email=record.get('email', ''),
+                    address=record.get('address'),
+                    emergency_contact_name=record.get('emergency_contact_name'),
+                    emergency_contact_phone=record.get('emergency_contact_phone'),
+                    emergency_contact_relationship=record.get('emergency_contact_relationship'),
+                    allergies=record.get('allergies'),
+                    active_problems=record.get('active_problems'),
+                    blood_type=record.get('blood_type'),
+                    notes=record.get('notes'),
+                    clinic_id=job.clinic_id,
+                    is_active=True,
+                )
+                patient_objects.append(patient)
+            
+            # Bulk insert batch
+            db.add_all(patient_objects)
+            await db.flush()  # Flush to get IDs
+            
+            # Map old IDs to new IDs for reference
+            for old_record, new_patient in zip(batch, patient_objects):
+                imported_patients.append({
+                    'old_id': old_record.get('id'),
+                    'new_id': new_patient.id
+                })
+        
+        await db.commit()
+        logger.info(f"Imported {len(imported_patients)} patients in batches")
     elif job.type == MigrationType.APPOINTMENTS:
         miss = missing_report(records, ['patient_id', 'doctor_id', 'scheduled_datetime'])
         errors = {'missing': miss}

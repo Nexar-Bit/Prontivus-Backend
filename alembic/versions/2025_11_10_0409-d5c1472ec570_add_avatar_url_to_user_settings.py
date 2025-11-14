@@ -19,8 +19,19 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Add avatar_url column to user_settings table
-    op.add_column('user_settings', sa.Column('avatar_url', sa.String(length=500), nullable=True))
+    # Add avatar_url column to user_settings table if it doesn't exist
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT FROM information_schema.columns 
+                WHERE table_schema = 'public' 
+                AND table_name = 'user_settings' 
+                AND column_name = 'avatar_url'
+            ) THEN
+                ALTER TABLE user_settings ADD COLUMN avatar_url VARCHAR(500);
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:

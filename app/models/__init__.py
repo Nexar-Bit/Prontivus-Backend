@@ -123,7 +123,9 @@ class User(BaseModel):
     # User Information
     first_name = Column(String(100), nullable=True)
     last_name = Column(String(100), nullable=True)
-    role = Column(SQLEnum(UserRole), nullable=False, default=UserRole.PATIENT)
+    role = Column(SQLEnum(UserRole), nullable=False, default=UserRole.PATIENT)  # Legacy enum field
+    role_id = Column(Integer, ForeignKey("user_roles.id"), nullable=True, index=True)  # New role reference
+    permissions = Column(JSON, nullable=True)  # Granular permissions JSON field
     
     # Status
     is_active = Column(Boolean, default=True, nullable=False)
@@ -134,6 +136,7 @@ class User(BaseModel):
     
     # Relationships
     clinic = relationship("Clinic", back_populates="users")
+    user_role = relationship("UserRole", back_populates="users")
     appointments_as_doctor = relationship(
         "Appointment",
         foreign_keys="Appointment.doctor_id",
@@ -318,6 +321,7 @@ from app.models.push_subscription import PushSubscription
 
 # Import message models
 from app.models.message import MessageThread, Message, MessageStatus
+from app.models.menu import UserRole as UserRoleModel, MenuGroup, MenuItem
 
 # Export all models
 __all__ = [
@@ -379,5 +383,8 @@ __all__ = [
     "MessageThread",
     "Message",
     "MessageStatus",
+    "UserRoleModel",
+    "MenuGroup",
+    "MenuItem",
 ]
 

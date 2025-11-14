@@ -43,14 +43,17 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """Create a JWT access token"""
     to_encode = data.copy()
     
+    now = datetime.utcnow()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = now + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     
+    # Convert datetime to Unix timestamp for JWT standard compliance
+    # This ensures proper handling even if system time changes
     to_encode.update({
-        "exp": expire,
-        "iat": datetime.utcnow(),
+        "exp": int(expire.timestamp()),
+        "iat": int(now.timestamp()),
         "type": "access",
         "jti": generate_secure_token(16)  # JWT ID for token tracking
     })
@@ -67,11 +70,13 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 def create_refresh_token(data: dict) -> str:
     """Create a JWT refresh token"""
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    now = datetime.utcnow()
+    expire = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     
+    # Convert datetime to Unix timestamp for JWT standard compliance
     to_encode.update({
-        "exp": expire,
-        "iat": datetime.utcnow(),
+        "exp": int(expire.timestamp()),
+        "iat": int(now.timestamp()),
         "type": "refresh",
         "jti": generate_secure_token(16)
     })
@@ -86,21 +91,52 @@ def create_refresh_token(data: dict) -> str:
 
 
 def verify_token(token: str) -> Dict[str, Any]:
-    """Verify and decode a JWT token"""
+    """
+    Verify and decode a JWT token
+    
+    Handles timezone changes and clock skew by manually checking expiration
+    with a 60-second tolerance. This ensures tokens remain valid even if
+    system time changes or there's clock drift between client and server.
+    """
     try:
+        # Decode token without automatic expiration check
+        # We'll manually check expiration with leeway to handle timezone changes
         payload = jwt.decode(
             token,
             settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM]
+            algorithms=[settings.ALGORITHM],
+            options={
+                "verify_signature": True,
+                "verify_exp": False,  # We'll check manually with leeway
+                "verify_iat": False,  # We'll check manually with leeway
+                "verify_nbf": False,  # Not using nbf claim
+                "require_exp": False,
+                "require_iat": False,
+            }
         )
         
-        # Check token type
+        # Manual expiration check with 60 seconds leeway for timezone changes
+        CLOCK_SKEW_SECONDS = 60
+        now = datetime.utcnow()
+        current_timestamp = int(now.timestamp())
+        
+        # Check expiration with leeway
+        exp = payload.get("exp")
+        if exp is not None:
+            # Token is expired if current time is more than leeway seconds past expiration
+            if current_timestamp > (exp + CLOCK_SKEW_SECONDS):
+                raise JWTError("Token has expired")
+        
+        # Check issued at time with leeway (prevent tokens from future)
+        iat = payload.get("iat")
+        if iat is not None:
+            # Token is invalid if issued more than leeway seconds in the future
+            if (iat - CLOCK_SKEW_SECONDS) > current_timestamp:
+                raise JWTError("Token issued in the future")
+        
+        # Check token type (custom claim)
         if payload.get("type") not in ["access", "refresh"]:
             raise JWTError("Invalid token type")
-        
-        # Check expiration
-        if datetime.utcnow() > datetime.fromtimestamp(payload.get("exp", 0)):
-            raise JWTError("Token expired")
         
         return payload
         
@@ -158,10 +194,13 @@ def record_login_attempt(identifier: str, success: bool) -> None:
 
 def create_password_reset_token(email: str) -> str:
     """Create a password reset token"""
+    now = datetime.utcnow()
+    expire = now + timedelta(hours=PASSWORD_RESET_EXPIRE_HOURS)
+    
     data = {
         "email": email,
         "type": "password_reset",
-        "exp": datetime.utcnow() + timedelta(hours=PASSWORD_RESET_EXPIRE_HOURS)
+        "exp": int(expire.timestamp())  # Convert to Unix timestamp
     }
     
     return jwt.encode(

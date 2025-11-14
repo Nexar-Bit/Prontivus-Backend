@@ -118,6 +118,10 @@ class PatientResponse(PatientBase):
     
     class Config:
         from_attributes = True
+        json_encoders = {
+            datetime.datetime: lambda v: v.isoformat() if v else None,
+            datetime.date: lambda v: v.isoformat() if v else None
+        }
 
 
 class PatientListResponse(BaseModel):

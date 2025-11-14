@@ -30,6 +30,7 @@ from app.schemas.auth import (
 )
 from config import settings
 from app.services.login_alert_service import send_login_alert
+from app.services.menu_service import MenuService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -89,12 +90,21 @@ async def login(
                     detail="Access denied. This login is restricted to patients only."
                 )
     
-    # Create token data
+    # Get user permissions and role from menu service
+    menu_service = MenuService(db)
+    user_role = await menu_service.get_user_role(user.id)
+    user_permissions = await menu_service.get_user_permissions(user.id)
+    menu_structure = await menu_service.get_menu_structure(user.id)
+    
+    # Create token data with permissions
     token_data = {
         "user_id": user.id,
         "username": user.username,
         "role": user.role.value,
-        "clinic_id": user.clinic_id
+        "role_id": user.role_id,
+        "role_name": user_role.name if user_role else None,
+        "clinic_id": user.clinic_id,
+        "permissions": list(user_permissions)  # Convert set to list for JSON serialization
     }
     
     # Generate tokens
@@ -106,8 +116,22 @@ async def login(
     result = await db.execute(query)
     user_with_clinic = result.scalar_one()
     
-    # Prepare user response
-    user_response = UserResponse.model_validate(user_with_clinic)
+    # Prepare user response with role information
+    user_dict = {
+        "id": user_with_clinic.id,
+        "username": user_with_clinic.username,
+        "email": user_with_clinic.email,
+        "first_name": user_with_clinic.first_name,
+        "last_name": user_with_clinic.last_name,
+        "role": user_with_clinic.role,
+        "role_id": user_with_clinic.role_id,
+        "role_name": user_role.name if user_role else None,
+        "is_active": user_with_clinic.is_active,
+        "is_verified": user_with_clinic.is_verified,
+        "clinic_id": user_with_clinic.clinic_id,
+        "clinic": user_with_clinic.clinic,
+    }
+    user_response = UserResponse.model_validate(user_dict)
     
     # Send login alert (background task, don't wait for it)
     try:
@@ -130,12 +154,42 @@ async def login(
         logger = logging.getLogger(__name__)
         logger.error(f"Failed to send login alert: {str(e)}")
     
+    # Convert menu structure to response format (using dict to match schema)
+    menu_response = []
+    for group in menu_structure:
+        menu_items = [
+            {
+                "id": item["id"],
+                "group_id": group["id"],
+                "name": item["name"],
+                "route": item["route"],
+                "icon": item.get("icon"),
+                "order_index": item["order_index"],
+                "description": item.get("description"),
+                "badge": item.get("badge"),
+                "is_external": item.get("is_external", False),
+                "permissions_required": item.get("permissions_required"),
+                "is_active": True
+            }
+            for item in group["items"]
+        ]
+        menu_response.append({
+            "id": group["id"],
+            "name": group["name"],
+            "description": group.get("description"),
+            "order_index": group["order_index"],
+            "icon": group.get("icon"),
+            "items": menu_items
+        })
+    
     return LoginResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         token_type="bearer",
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=user_response
+        user=user_response,
+        menu=menu_response,
+        permissions=list(user_permissions)
     )
 
 
@@ -217,14 +271,35 @@ async def get_current_user_info(
         db: Database session
         
     Returns:
-        Current user data with clinic information
+        Current user data with clinic information and role details
     """
     # Load clinic information
     query = select(User).options(selectinload(User.clinic)).where(User.id == current_user.id)
     result = await db.execute(query)
     user_with_clinic = result.scalar_one()
     
-    return UserResponse.model_validate(user_with_clinic)
+    # Get role information from menu service
+    from app.services.menu_service import MenuService
+    menu_service = MenuService(db)
+    user_role = await menu_service.get_user_role(user_with_clinic.id)
+    
+    # Create user response with role information
+    user_dict = {
+        "id": user_with_clinic.id,
+        "username": user_with_clinic.username,
+        "email": user_with_clinic.email,
+        "first_name": user_with_clinic.first_name,
+        "last_name": user_with_clinic.last_name,
+        "role": user_with_clinic.role,
+        "role_id": user_with_clinic.role_id,
+        "role_name": user_role.name if user_role else None,
+        "is_active": user_with_clinic.is_active,
+        "is_verified": user_with_clinic.is_verified,
+        "clinic_id": user_with_clinic.clinic_id,
+        "clinic": user_with_clinic.clinic,
+    }
+    
+    return UserResponse.model_validate(user_dict)
 
 
 @router.post("/refresh", response_model=TokenResponse)

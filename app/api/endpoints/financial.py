@@ -224,7 +224,7 @@ async def get_my_invoices(
         joinedload(Invoice.appointment),
         selectinload(Invoice.invoice_lines).joinedload(InvoiceLine.service_item),
         selectinload(Invoice.invoice_lines).joinedload(InvoiceLine.procedure),
-        selectinload(Invoice.payments)
+        selectinload(Invoice.payments).joinedload(Payment.creator)
     ).filter(
         and_(
             Invoice.patient_id == patient.id,
@@ -272,6 +272,18 @@ async def get_my_invoices(
                         # Skip problematic lines
                         continue
             
+            # Build payments list
+            payments_list = None
+            if hasattr(invoice, 'payments') and invoice.payments:
+                payments_list = []
+                for payment in invoice.payments:
+                    try:
+                        from app.schemas.financial import PaymentResponse
+                        payment_data = PaymentResponse.model_validate(payment, from_attributes=True).model_dump()
+                        payments_list.append(payment_data)
+                    except Exception:
+                        continue
+            
             # Build base invoice dict from model
             invoice_dict = {
                 "id": invoice.id,
@@ -287,6 +299,7 @@ async def get_my_invoices(
                 "patient_name": patient_name,
                 "appointment_date": appointment_date,
                 "invoice_lines": invoice_lines_list,
+                "payments": payments_list,
             }
             
             # Validate and create response
@@ -309,12 +322,14 @@ async def get_invoice(
 ):
     """
     Get detailed invoice information
+    Patients can only access their own invoices
     """
     query = select(Invoice).options(
         joinedload(Invoice.patient),
         joinedload(Invoice.appointment).joinedload(Appointment.doctor),
-        joinedload(Invoice.invoice_lines).joinedload(InvoiceLine.service_item),
-        joinedload(Invoice.invoice_lines).joinedload(InvoiceLine.procedure)
+        selectinload(Invoice.invoice_lines).joinedload(InvoiceLine.service_item),
+        selectinload(Invoice.invoice_lines).joinedload(InvoiceLine.procedure),
+        selectinload(Invoice.payments).joinedload(Payment.creator)
     ).filter(
         and_(
             Invoice.id == invoice_id,
@@ -331,6 +346,23 @@ async def get_invoice(
             detail="Invoice not found"
         )
     
+    # If user is a patient, verify they own this invoice
+    if current_user.role == UserRole.PATIENT:
+        patient_query = select(Patient).filter(
+            and_(
+                Patient.email == current_user.email,
+                Patient.clinic_id == current_user.clinic_id
+            )
+        )
+        patient_result = await db.execute(patient_query)
+        patient = patient_result.scalar_one_or_none()
+        
+        if not patient or invoice.patient_id != patient.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You can only view your own invoices."
+            )
+    
     # Add computed fields
     invoice.patient_name = invoice.patient.full_name
     if invoice.appointment:
@@ -342,7 +374,22 @@ async def get_invoice(
         if line.procedure:
             line.procedure_name = line.procedure.name
     
-    return invoice
+    # Build payments list
+    payments_list = []
+    if hasattr(invoice, 'payments') and invoice.payments:
+        for payment in invoice.payments:
+            try:
+                from app.schemas.financial import PaymentResponse
+                payment_data = PaymentResponse.model_validate(payment, from_attributes=True).model_dump()
+                payments_list.append(payment_data)
+            except Exception:
+                continue
+    
+    # Create response dict with payments
+    invoice_dict = InvoiceDetailResponse.model_validate(invoice, from_attributes=True).model_dump()
+    invoice_dict["payments"] = payments_list
+    
+    return InvoiceDetailResponse(**invoice_dict)
 
 
 @router.post("/invoices", response_model=InvoiceDetailResponse, status_code=status.HTTP_201_CREATED)

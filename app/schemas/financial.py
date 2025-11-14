@@ -2,6 +2,8 @@
 Financial module Pydantic schemas
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional, List
@@ -73,6 +75,10 @@ class InvoiceLineResponse(InvoiceLineBase):
 
     class Config:
         from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None,
+            Decimal: lambda v: float(v) if v else 0.0
+        }
 
 
 class InvoiceBase(BaseModel):
@@ -109,6 +115,10 @@ class InvoiceResponse(InvoiceBase):
 
     class Config:
         from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None,
+            Decimal: lambda v: float(v) if v else 0.0
+        }
 
 
 class InvoiceDetailResponse(InvoiceResponse):
@@ -117,6 +127,7 @@ class InvoiceDetailResponse(InvoiceResponse):
     appointment_date: Optional[datetime] = None
     doctor_name: Optional[str] = None
     invoice_lines: List[InvoiceLineResponse]
+    payments: Optional[List[PaymentResponse]] = None
 
 
 # ==================== Invoice Generation ====================
@@ -184,6 +195,10 @@ class PaymentResponse(PaymentBase):
 
     class Config:
         from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None,
+            Decimal: lambda v: float(v) if v else 0.0
+        }
 
 
 # ==================== Insurance Plans ====================

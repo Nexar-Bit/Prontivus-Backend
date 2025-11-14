@@ -19,27 +19,47 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create tiss_templates table
-    op.create_table('tiss_templates',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('name', sa.String(length=200), nullable=False),
-        sa.Column('description', sa.Text(), nullable=True),
-        sa.Column('category', sa.Enum('consultation', 'procedure', 'exam', 'emergency', 'custom', name='tisstemplatecategory'), nullable=False),
-        sa.Column('xml_template', sa.Text(), nullable=False),
-        sa.Column('variables', sa.JSON(), nullable=True),
-        sa.Column('is_default', sa.Boolean(), nullable=False, server_default='false'),
-        sa.Column('is_active', sa.Boolean(), nullable=False, server_default='true'),
-        sa.Column('clinic_id', sa.Integer(), nullable=False),
-        sa.Column('created_by_id', sa.Integer(), nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(['clinic_id'], ['clinics.id'], ),
-        sa.ForeignKeyConstraint(['created_by_id'], ['users.id'], ),
-        sa.PrimaryKeyConstraint('id')
-    )
-    op.create_index(op.f('ix_tiss_templates_id'), 'tiss_templates', ['id'], unique=False)
-    op.create_index(op.f('ix_tiss_templates_name'), 'tiss_templates', ['name'], unique=False)
-    op.create_index(op.f('ix_tiss_templates_clinic_id'), 'tiss_templates', ['clinic_id'], unique=False)
+    # Create enum type if it doesn't exist
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE tisstemplatecategory AS ENUM (
+                'consultation', 'procedure', 'exam', 'emergency', 'custom'
+            );
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
+    
+    # Check if table already exists
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'tiss_templates'
+            ) THEN
+                -- Create tiss_templates table using raw SQL
+                CREATE TABLE tiss_templates (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    description TEXT,
+                    category tisstemplatecategory NOT NULL,
+                    xml_template TEXT NOT NULL,
+                    variables JSONB,
+                    is_default BOOLEAN NOT NULL DEFAULT false,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    clinic_id INTEGER NOT NULL REFERENCES clinics(id),
+                    created_by_id INTEGER REFERENCES users(id),
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE
+                );
+                
+                CREATE INDEX ix_tiss_templates_id ON tiss_templates(id);
+                CREATE INDEX ix_tiss_templates_name ON tiss_templates(name);
+                CREATE INDEX ix_tiss_templates_clinic_id ON tiss_templates(clinic_id);
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:

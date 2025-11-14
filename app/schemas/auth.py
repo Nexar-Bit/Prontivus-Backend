@@ -134,6 +134,8 @@ class UserResponse(BaseModel):
     first_name: Optional[str]
     last_name: Optional[str]
     role: UserRole
+    role_id: Optional[int] = None  # Role ID from menu system
+    role_name: Optional[str] = None  # Role name (e.g., "SuperAdmin", "Medico")
     is_active: bool
     is_verified: bool
     clinic_id: int
@@ -165,13 +167,18 @@ class UserResponse(BaseModel):
         }
 
 
+# Menu schemas are imported from menu.py to avoid duplication
+
+
 class LoginResponse(BaseModel):
-    """Complete login response with token and user data"""
+    """Complete login response with token, user data, and menu structure"""
     access_token: str
     refresh_token: Optional[str]
     token_type: str = "bearer"
     expires_in: int
     user: UserResponse
+    menu: Optional[List[dict]] = None  # Menu structure for the user (using dict to avoid circular import)
+    permissions: Optional[List[str]] = None  # User permissions list
     
     class Config:
         json_schema_extra = {
@@ -190,7 +197,9 @@ class LoginResponse(BaseModel):
                     "is_active": True,
                     "is_verified": True,
                     "clinic_id": 1
-                }
+                },
+                "menu": [],
+                "permissions": []
             }
         }
 

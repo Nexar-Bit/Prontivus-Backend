@@ -10,7 +10,7 @@ import os
 import json
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config, messages
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard
 from app.api.endpoints import icd10
 
 # Import security middleware
@@ -270,6 +270,9 @@ app.include_router(notifications.router, prefix=API_V1_PREFIX, tags=["Notificati
 app.include_router(tiss_config.router, prefix=f"{API_V1_PREFIX}/financial", tags=["TISS Config"])
 app.include_router(user_settings.router, prefix=API_V1_PREFIX, tags=["User Settings"])
 app.include_router(messages.router, prefix=API_V1_PREFIX, tags=["Messages"])
+app.include_router(menu.router, prefix=API_V1_PREFIX, tags=["Menu Management"])
+app.include_router(rbac_test.router, prefix=API_V1_PREFIX, tags=["RBAC Testing"])
+app.include_router(patient_dashboard.router, prefix=API_V1_PREFIX, tags=["Patient Dashboard"])
 
 # Legacy /api routes for backward compatibility (deprecated)
 # TODO: Remove in v2.0.0
@@ -296,6 +299,8 @@ app.include_router(notifications.router, prefix="/api", tags=["Notifications (Le
 app.include_router(tiss_config.router, prefix="/api/financial", tags=["TISS Config (Legacy)"], deprecated=True)
 app.include_router(user_settings.router, prefix="/api", tags=["User Settings (Legacy)"], deprecated=True)
 app.include_router(messages.router, prefix="/api", tags=["Messages (Legacy)"], deprecated=True)
+app.include_router(menu.router, prefix="/api", tags=["Menu Management (Legacy)"], deprecated=True)
+app.include_router(patient_dashboard.router, prefix="/api", tags=["Patient Dashboard (Legacy)"], deprecated=True)
 
 @app.get("/")
 async def root():

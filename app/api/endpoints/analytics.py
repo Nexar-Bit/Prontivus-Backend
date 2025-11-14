@@ -598,7 +598,9 @@ async def get_financial_analytics(
             "total_invoices": total_invoices,
             "ar_aging": buckets,
             "cost_per_procedure": cost_per_procedure,
-            "denial_patterns": [],  # TODO: integrate with claims/denials module when available
+            "denial_patterns": [],  # Note: Claims/denials module integration would go here
+            # To implement: Query denial reasons from insurance claims and identify patterns
+            # Example patterns: "Missing documentation", "Out of network", "Prior authorization required"
         }
         analytics_cache.set(cache_key, resp, ttl_seconds=300)
         return resp

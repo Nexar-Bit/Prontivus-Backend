@@ -42,25 +42,34 @@ def upgrade() -> None:
         END $$;
     """)
     
-    # Create payments table
-    op.create_table('payments',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('invoice_id', sa.Integer(), nullable=False),
-        sa.Column('amount', sa.Numeric(precision=10, scale=2), nullable=False),
-        sa.Column('method', sa.Enum('cash', 'credit_card', 'debit_card', 'bank_transfer', 'pix', 'check', 'insurance', 'other', name='paymentmethod'), nullable=False),
-        sa.Column('status', sa.Enum('pending', 'completed', 'failed', 'cancelled', 'refunded', name='paymentstatus'), nullable=False, server_default='pending'),
-        sa.Column('paid_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('reference_number', sa.String(length=100), nullable=True),
-        sa.Column('notes', sa.Text(), nullable=True),
-        sa.Column('created_by', sa.Integer(), nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
-        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
-        sa.ForeignKeyConstraint(['invoice_id'], ['invoices.id'], ),
-        sa.ForeignKeyConstraint(['created_by'], ['users.id'], ),
-        sa.PrimaryKeyConstraint('id')
-    )
-    op.create_index(op.f('ix_payments_id'), 'payments', ['id'], unique=False)
-    op.create_index('ix_payments_invoice_id', 'payments', ['invoice_id'], unique=False)
+    # Check if table already exists and create using raw SQL
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'payments'
+            ) THEN
+                -- Create payments table using raw SQL
+                CREATE TABLE payments (
+                    id SERIAL PRIMARY KEY,
+                    invoice_id INTEGER NOT NULL REFERENCES invoices(id),
+                    amount NUMERIC(10, 2) NOT NULL,
+                    method paymentmethod NOT NULL,
+                    status paymentstatus NOT NULL DEFAULT 'pending',
+                    paid_at TIMESTAMP WITH TIME ZONE,
+                    reference_number VARCHAR(100),
+                    notes TEXT,
+                    created_by INTEGER REFERENCES users(id),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+                );
+                
+                CREATE INDEX ix_payments_id ON payments(id);
+                CREATE INDEX ix_payments_invoice_id ON payments(invoice_id);
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:

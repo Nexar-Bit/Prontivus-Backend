@@ -100,7 +100,14 @@ async def update_my_patient_profile(
     # Update patient fields
     update_data = patient_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
-        setattr(patient, field, value)
+        # Handle None values for optional fields (allow clearing fields)
+        if value is None and field in ['emergency_contact_name', 'emergency_contact_phone', 
+                                       'emergency_contact_relationship', 'allergies', 
+                                       'active_problems', 'blood_type', 'notes', 'address', 
+                                       'cpf', 'phone']:
+            setattr(patient, field, None)
+        elif value is not None:
+            setattr(patient, field, value)
     
     await db.commit()
     await db.refresh(patient)

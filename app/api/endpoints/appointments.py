@@ -37,8 +37,22 @@ async def check_slot_availability(
     """
     Check if a time slot is available for a doctor
     """
+    from datetime import timezone as tz
+    
+    # Ensure scheduled_datetime is timezone-aware
+    if scheduled_datetime.tzinfo is None:
+        scheduled_datetime = scheduled_datetime.replace(tzinfo=tz.utc)
+    
     start_time = scheduled_datetime
     end_time = scheduled_datetime + datetime.timedelta(minutes=duration_minutes)
+    
+    # Helper function to make datetime timezone-aware
+    def make_aware(dt):
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=tz.utc)
+        return dt
     
     # Check for overlapping appointments
     query = select(Appointment).filter(
@@ -49,10 +63,7 @@ async def check_slot_availability(
                 AppointmentStatus.SCHEDULED,
                 AppointmentStatus.CHECKED_IN,
                 AppointmentStatus.IN_CONSULTATION
-            ]),
-            # Check for overlap: appointment starts before this slot ends AND ends after this slot starts
-            Appointment.scheduled_datetime < end_time,
-            Appointment.scheduled_datetime >= start_time - datetime.timedelta(minutes=duration_minutes)
+            ])
         )
     )
     
@@ -60,9 +71,19 @@ async def check_slot_availability(
         query = query.filter(Appointment.id != exclude_appointment_id)
     
     result = await db.execute(query)
-    overlapping = result.scalars().first()
+    appointments = result.scalars().all()
     
-    return overlapping is None
+    # Check for overlap manually to handle timezone-aware comparisons
+    for apt in appointments:
+        apt_start = make_aware(apt.scheduled_datetime)
+        if apt_start:
+            apt_end = apt_start + datetime.timedelta(minutes=apt.duration_minutes or 30)
+            
+            # Check for overlap: appointment starts before this slot ends AND ends after this slot starts
+            if not (end_time <= apt_start or start_time >= apt_end):
+                return False
+    
+    return True
 
 
 @router.get("", response_model=List[AppointmentListResponse])
@@ -246,6 +267,195 @@ async def cancel_patient_appointment(
 
 class ReschedulePayload(AppointmentUpdate):
     pass
+
+
+@router.post("/patient/book", response_model=AppointmentResponse, status_code=status.HTTP_201_CREATED)
+async def book_patient_appointment(
+    appointment_in: AppointmentCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Allow a patient to book a new appointment
+    """
+    if current_user.role != UserRole.PATIENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for patients"
+        )
+    
+    # Map user to patient by email and clinic
+    patient_result = await db.execute(
+        select(Patient).filter(
+            and_(
+                Patient.email == current_user.email,
+                Patient.clinic_id == current_user.clinic_id
+            )
+        )
+    )
+    patient = patient_result.scalar_one_or_none()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    
+    # Ensure appointment is for the current patient
+    if appointment_in.patient_id != patient.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot create appointment for a different patient"
+        )
+    
+    # Ensure appointment is for the current clinic
+    if appointment_in.clinic_id != current_user.clinic_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot create appointment for a different clinic"
+        )
+    
+    # Validate doctor exists and has doctor role
+    doctor_query = select(User).filter(
+        and_(
+            User.id == appointment_in.doctor_id,
+            User.clinic_id == current_user.clinic_id,
+            User.role == UserRole.DOCTOR
+        )
+    )
+    doctor_result = await db.execute(doctor_query)
+    doctor = doctor_result.scalar_one_or_none()
+    if not doctor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Doctor not found"
+        )
+    
+    # Check slot availability
+    is_available = await check_slot_availability(
+        db,
+        appointment_in.doctor_id,
+        appointment_in.scheduled_datetime,
+        current_user.clinic_id
+    )
+    
+    if not is_available:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This time slot is not available for the selected doctor"
+        )
+    
+    # Create appointment
+    db_appointment = Appointment(**appointment_in.model_dump())
+    db.add(db_appointment)
+    await db.commit()
+    await db.refresh(db_appointment)
+    
+    # Build response with patient and doctor names
+    response = AppointmentResponse.model_validate(db_appointment)
+    response.patient_name = patient.full_name
+    response.doctor_name = doctor.full_name
+    
+    # Broadcast event
+    await appointment_realtime_manager.broadcast(
+        current_user.clinic_id,
+        {
+            "type": "appointment_created",
+            "appointment_id": db_appointment.id,
+            "status": str(db_appointment.status),
+        },
+    )
+    
+    return response
+
+
+@router.get("/doctor/{doctor_id}/availability")
+async def get_doctor_availability(
+    doctor_id: int,
+    date: datetime.date = Query(..., description="Date to check availability"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get available time slots for a doctor on a specific date
+    """
+    from datetime import timezone as tz
+    
+    # Validate doctor exists and belongs to same clinic
+    doctor_query = select(User).filter(
+        and_(
+            User.id == doctor_id,
+            User.clinic_id == current_user.clinic_id,
+            User.role == UserRole.DOCTOR
+        )
+    )
+    doctor_result = await db.execute(doctor_query)
+    doctor = doctor_result.scalar_one_or_none()
+    if not doctor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Doctor not found"
+        )
+    
+    # Get all appointments for this doctor on this date
+    # Use timezone-aware datetimes
+    start_datetime = datetime.datetime.combine(date, datetime.time.min).replace(tzinfo=tz.utc)
+    end_datetime = datetime.datetime.combine(date, datetime.time.max).replace(tzinfo=tz.utc)
+    
+    appointments_query = select(Appointment).filter(
+        and_(
+            Appointment.doctor_id == doctor_id,
+            Appointment.clinic_id == current_user.clinic_id,
+            Appointment.scheduled_datetime >= start_datetime,
+            Appointment.scheduled_datetime <= end_datetime,
+            Appointment.status.in_([
+                AppointmentStatus.SCHEDULED,
+                AppointmentStatus.CHECKED_IN,
+                AppointmentStatus.IN_CONSULTATION
+            ])
+        )
+    )
+    appointments_result = await db.execute(appointments_query)
+    appointments = appointments_result.scalars().all()
+    
+    # Helper function to make datetime timezone-aware
+    def make_aware(dt):
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=tz.utc)
+        return dt
+    
+    # Generate time slots (8:00 to 18:00, 30-minute intervals)
+    available_slots = []
+    start_hour = 8
+    end_hour = 18
+    
+    for hour in range(start_hour, end_hour):
+        for minute in [0, 30]:
+            slot_time = datetime.datetime.combine(date, datetime.time(hour, minute)).replace(tzinfo=tz.utc)
+            slot_end = slot_time + datetime.timedelta(minutes=30)
+            
+            # Check if this slot conflicts with any appointment
+            is_available = True
+            for apt in appointments:
+                apt_start = make_aware(apt.scheduled_datetime)
+                if apt_start:
+                    apt_end = apt_start + datetime.timedelta(minutes=apt.duration_minutes or 30)
+                    
+                    # Check for overlap
+                    if not (slot_end <= apt_start or slot_time >= apt_end):
+                        is_available = False
+                        break
+            
+            available_slots.append({
+                "time": slot_time.strftime("%H:%M"),
+                "datetime": slot_time.isoformat(),
+                "available": is_available
+            })
+    
+    return {
+        "doctor_id": doctor_id,
+        "doctor_name": f"{doctor.first_name} {doctor.last_name}",
+        "date": date.isoformat(),
+        "slots": available_slots
+    }
 
 
 @router.post("/{appointment_id}/reschedule", response_model=AppointmentResponse)

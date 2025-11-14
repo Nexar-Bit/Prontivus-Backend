@@ -40,28 +40,37 @@ def upgrade() -> None:
         END $$;
     """)
     
-    # Create migration_jobs table
-    op.create_table(
-        'migration_jobs',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('clinic_id', sa.Integer(), nullable=False),
-        sa.Column('created_by', sa.Integer(), nullable=False),
-        sa.Column('type', sa.Enum('patients', 'appointments', 'clinical', 'financial', name='migrationtype'), nullable=False),
-        sa.Column('status', sa.Enum('pending', 'running', 'completed', 'failed', 'rolled_back', name='migrationstatus'), nullable=False, server_default='pending'),
-        sa.Column('input_format', sa.String(length=16), nullable=False),
-        sa.Column('source_name', sa.String(length=255), nullable=True),
-        sa.Column('params', sa.JSON(), nullable=True),
-        sa.Column('stats', sa.JSON(), nullable=True),
-        sa.Column('errors', sa.JSON(), nullable=True),
-        sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-        sa.PrimaryKeyConstraint('id')
-    )
-    op.create_index('ix_migration_jobs_id', 'migration_jobs', ['id'], unique=False)
-    op.create_index('ix_migration_jobs_clinic_id', 'migration_jobs', ['clinic_id'], unique=False)
-    op.create_index('ix_migration_jobs_created_by', 'migration_jobs', ['created_by'], unique=False)
+    # Create migration_jobs table if it doesn't exist
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'migration_jobs'
+            ) THEN
+                CREATE TABLE migration_jobs (
+                    id SERIAL PRIMARY KEY,
+                    clinic_id INTEGER NOT NULL,
+                    created_by INTEGER NOT NULL,
+                    type migrationtype NOT NULL,
+                    status migrationstatus NOT NULL DEFAULT 'pending',
+                    input_format VARCHAR(16) NOT NULL,
+                    source_name VARCHAR(255),
+                    params JSONB,
+                    stats JSONB,
+                    errors JSONB,
+                    started_at TIMESTAMP WITH TIME ZONE,
+                    completed_at TIMESTAMP WITH TIME ZONE,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+                );
+                
+                CREATE INDEX ix_migration_jobs_id ON migration_jobs(id);
+                CREATE INDEX ix_migration_jobs_clinic_id ON migration_jobs(clinic_id);
+                CREATE INDEX ix_migration_jobs_created_by ON migration_jobs(created_by);
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:

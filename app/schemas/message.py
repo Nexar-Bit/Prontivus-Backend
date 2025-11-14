@@ -8,7 +8,7 @@ from app.models.message import MessageStatus
 
 
 class MessageBase(BaseModel):
-    content: str = Field(..., min_length=1)
+    content: str = Field(default="", min_length=0)  # Allow empty content if attachments are present
     attachments: Optional[List[Dict[str, Any]]] = None
     medical_context: Optional[Dict[str, Any]] = None
 
@@ -28,6 +28,9 @@ class MessageResponse(MessageBase):
     
     class Config:
         from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
 
 
 class MessageThreadBase(BaseModel):
@@ -57,6 +60,9 @@ class MessageThreadResponse(BaseModel):
     
     class Config:
         from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
 
 
 class MessageThreadDetailResponse(MessageThreadResponse):

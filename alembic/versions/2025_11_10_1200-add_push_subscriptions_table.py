@@ -18,24 +18,32 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create push_subscriptions table
-    op.create_table(
-        'push_subscriptions',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('user_id', sa.Integer(), nullable=False),
-        sa.Column('endpoint', sa.String(length=500), nullable=False),
-        sa.Column('p256dh', sa.String(length=200), nullable=False),
-        sa.Column('auth', sa.String(length=100), nullable=False),
-        sa.Column('user_agent', sa.String(length=500), nullable=True),
-        sa.Column('device_info', sa.JSON(), nullable=True),
-        sa.Column('is_active', sa.Boolean(), nullable=False, server_default='true'),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
-        sa.PrimaryKeyConstraint('id')
-    )
-    op.create_index('ix_push_subscriptions_user_id', 'push_subscriptions', ['user_id'], unique=False)
-    op.create_index('ix_push_subscriptions_endpoint', 'push_subscriptions', ['endpoint'], unique=False)
+    # Create push_subscriptions table if it doesn't exist
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'push_subscriptions'
+            ) THEN
+                CREATE TABLE push_subscriptions (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    endpoint VARCHAR(500) NOT NULL,
+                    p256dh VARCHAR(200) NOT NULL,
+                    auth VARCHAR(100) NOT NULL,
+                    user_agent VARCHAR(500),
+                    device_info JSONB,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE
+                );
+                
+                CREATE INDEX ix_push_subscriptions_user_id ON push_subscriptions(user_id);
+                CREATE INDEX ix_push_subscriptions_endpoint ON push_subscriptions(endpoint);
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:

@@ -105,12 +105,19 @@ async def list_threads(
         last_msg_result = await db.execute(last_msg_query)
         last_message = last_msg_result.scalar_one_or_none()
         
-        # Get provider name
+        # Get provider name safely
         if patient:
-            provider_name = f"{thread.provider.first_name} {thread.provider.last_name}" if thread.provider else "Unknown"
+            if thread.provider:
+                provider_name = f"{thread.provider.first_name or ''} {thread.provider.last_name or ''}".strip()
+                if not provider_name:
+                    provider_name = thread.provider.username or "Unknown"
+            else:
+                provider_name = "Unknown"
             provider_specialty = None
         else:
-            provider_name = f"{current_user.first_name} {current_user.last_name}"
+            provider_name = f"{current_user.first_name or ''} {current_user.last_name or ''}".strip()
+            if not provider_name:
+                provider_name = current_user.username or "Unknown"
             provider_specialty = None
         
         response.append(MessageThreadResponse(
@@ -200,12 +207,19 @@ async def get_thread(
     last_msg_result = await db.execute(last_msg_query)
     last_message = last_msg_result.scalar_one_or_none()
     
-    # Get provider name
+    # Get provider name safely
     if patient:
-        provider_name = f"{thread.provider.first_name} {thread.provider.last_name}" if thread.provider else "Unknown"
+        if thread.provider:
+            provider_name = f"{thread.provider.first_name or ''} {thread.provider.last_name or ''}".strip()
+            if not provider_name:
+                provider_name = thread.provider.username or "Unknown"
+        else:
+            provider_name = "Unknown"
         provider_specialty = None
     else:
-        provider_name = f"{current_user.first_name} {current_user.last_name}"
+        provider_name = f"{current_user.first_name or ''} {current_user.last_name or ''}".strip()
+        if not provider_name:
+            provider_name = current_user.username or "Unknown"
         provider_specialty = None
     
     # Mark messages as read
@@ -302,12 +316,17 @@ async def create_thread(
     existing = existing_result.scalar_one_or_none()
     
     if existing:
+        # Get provider name safely
+        provider_name = f"{provider.first_name or ''} {provider.last_name or ''}".strip()
+        if not provider_name:
+            provider_name = provider.username or "Unknown"
+        
         # Return existing thread
         return MessageThreadResponse(
             id=existing.id,
             patient_id=existing.patient_id,
             provider_id=existing.provider_id,
-            provider_name=f"{provider.first_name} {provider.last_name}",
+            provider_name=provider_name,
             provider_specialty=None,
             topic=existing.topic,
             is_urgent=existing.is_urgent,
@@ -331,11 +350,16 @@ async def create_thread(
     await db.commit()
     await db.refresh(thread)
     
+    # Get provider name safely
+    provider_name = f"{provider.first_name or ''} {provider.last_name or ''}".strip()
+    if not provider_name:
+        provider_name = provider.username or "Unknown"
+    
     return MessageThreadResponse(
         id=thread.id,
         patient_id=thread.patient_id,
         provider_id=thread.provider_id,
-        provider_name=f"{provider.first_name} {provider.last_name}",
+        provider_name=provider_name,
         provider_specialty=None,
         topic=thread.topic,
         is_urgent=thread.is_urgent,
@@ -385,12 +409,19 @@ async def send_message(
             raise HTTPException(status_code=403, detail="Access denied")
         sender_type = "provider"
     
+    # Validate that message has content or attachments
+    if not message_in.content and not message_in.attachments:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message must have content or attachments"
+        )
+    
     # Create message
     message = Message(
         thread_id=thread_id,
         sender_id=current_user.id,
         sender_type=sender_type,
-        content=message_in.content,
+        content=message_in.content or "",  # Allow empty content if attachments exist
         attachments=message_in.attachments,
         medical_context=message_in.medical_context,
         status=MessageStatus.SENT,
