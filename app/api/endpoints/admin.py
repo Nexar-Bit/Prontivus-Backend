@@ -305,6 +305,178 @@ async def update_clinic(
     return clinic
 
 
+@router.get("/clinics/me", response_model=ClinicResponse)
+async def get_my_clinic(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
+):
+    """
+    Get the current user's clinic information
+    Available to any authenticated user
+    """
+    if not current_user.clinic_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not associated with a clinic"
+        )
+    
+    query = select(Clinic).filter(Clinic.id == current_user.clinic_id)
+    result = await db.execute(query)
+    clinic = result.scalar_one_or_none()
+    
+    if not clinic:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinic not found"
+        )
+    
+    # Ensure date-only fields for pydantic schema
+    from datetime import date as date_type
+    
+    created_at_date = None
+    if hasattr(clinic, "created_at") and clinic.created_at:
+        if isinstance(clinic.created_at, date_type):
+            created_at_date = clinic.created_at
+        else:
+            created_at_date = clinic.created_at.date()
+    
+    updated_at_date = None
+    if hasattr(clinic, "updated_at") and clinic.updated_at:
+        if isinstance(clinic.updated_at, date_type):
+            updated_at_date = clinic.updated_at
+        else:
+            updated_at_date = clinic.updated_at.date()
+    
+    # Use current date as fallback for created_at if it doesn't exist
+    if not created_at_date:
+        created_at_date = date_type.today()
+    
+    return ClinicResponse(
+        id=clinic.id,
+        name=clinic.name,
+        legal_name=clinic.legal_name,
+        tax_id=clinic.tax_id,
+        address=clinic.address,
+        phone=clinic.phone,
+        email=clinic.email,
+        is_active=clinic.is_active,
+        license_key=clinic.license_key,
+        expiration_date=clinic.expiration_date,
+        max_users=clinic.max_users,
+        active_modules=clinic.active_modules or [],
+        created_at=created_at_date,
+        updated_at=updated_at_date,
+    )
+
+
+@router.put("/clinics/me", response_model=ClinicResponse)
+async def update_my_clinic(
+    clinic_data: ClinicUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
+):
+    """
+    Update the current user's clinic information
+    Available to admin users (AdminClinica role) or super admin
+    """
+    # Check if user has permission (admin role or super admin)
+    if current_user.role not in [UserRole.ADMIN] and current_user.role_id != 2:  # AdminClinica role_id is 2
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only clinic administrators can update clinic information"
+        )
+    
+    if not current_user.clinic_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not associated with a clinic"
+        )
+    
+    query = select(Clinic).filter(Clinic.id == current_user.clinic_id)
+    result = await db.execute(query)
+    clinic = result.scalar_one_or_none()
+    
+    if not clinic:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinic not found"
+        )
+    
+    # Check if tax_id is unique (if being updated)
+    if clinic_data.tax_id and clinic_data.tax_id != clinic.tax_id:
+        existing_clinic = await db.execute(
+            select(Clinic).filter(Clinic.tax_id == clinic_data.tax_id)
+        )
+        if existing_clinic.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Clinic with this tax ID already exists"
+            )
+    
+    # Check if license_key is unique (if being updated)
+    if clinic_data.license_key and clinic_data.license_key != clinic.license_key:
+        existing_license = await db.execute(
+            select(Clinic).filter(Clinic.license_key == clinic_data.license_key)
+        )
+        if existing_license.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="License key already exists"
+            )
+    
+    # Update clinic (only allow updating basic info, not license info for clinic admins)
+    # For clinic admins, restrict updates to basic information only
+    if current_user.role_id == 2:  # AdminClinica - restrict to basic info
+        update_data = clinic_data.model_dump(exclude_unset=True, exclude={'license_key', 'expiration_date', 'max_users', 'active_modules'})
+    else:  # Super admin - allow all updates
+        update_data = clinic_data.model_dump(exclude_unset=True)
+    
+    for field, value in update_data.items():
+        setattr(clinic, field, value)
+    
+    await db.commit()
+    await db.refresh(clinic)
+    
+    # Use model_validate with from_attributes since ClinicResponse has from_attributes = True
+    # But we need to handle date conversion manually
+    from datetime import date as date_type
+    
+    clinic_dict = {
+        "id": clinic.id,
+        "name": clinic.name,
+        "legal_name": clinic.legal_name,
+        "tax_id": clinic.tax_id,
+        "address": clinic.address,
+        "phone": clinic.phone,
+        "email": clinic.email,
+        "is_active": clinic.is_active,
+        "license_key": clinic.license_key,
+        "expiration_date": clinic.expiration_date,
+        "max_users": clinic.max_users,
+        "active_modules": clinic.active_modules if clinic.active_modules else [],
+    }
+    
+    # Handle created_at
+    if hasattr(clinic, "created_at") and clinic.created_at:
+        if isinstance(clinic.created_at, date_type):
+            clinic_dict["created_at"] = clinic.created_at
+        else:
+            clinic_dict["created_at"] = clinic.created_at.date()
+    else:
+        clinic_dict["created_at"] = date_type.today()
+    
+    # Handle updated_at
+    if hasattr(clinic, "updated_at") and clinic.updated_at:
+        if isinstance(clinic.updated_at, date_type):
+            clinic_dict["updated_at"] = clinic.updated_at
+        else:
+            clinic_dict["updated_at"] = clinic.updated_at.date()
+    else:
+        clinic_dict["updated_at"] = None
+    
+    return ClinicResponse(**clinic_dict)
+
+
 @router.patch("/clinics/{clinic_id}/license", response_model=ClinicResponse)
 async def update_clinic_license(
     clinic_id: int,
@@ -466,6 +638,76 @@ async def get_available_modules(
     Get list of available modules
     """
     return AVAILABLE_MODULES
+
+
+@router.patch("/clinics/me/modules", response_model=ClinicResponse)
+async def update_my_clinic_modules(
+    modules_data: Dict[str, Any],
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session)
+):
+    """
+    Update the current clinic's active modules
+    Only admins can update modules
+    """
+    if not current_user.clinic_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not associated with a clinic"
+        )
+    
+    query = select(Clinic).filter(Clinic.id == current_user.clinic_id)
+    result = await db.execute(query)
+    clinic = result.scalar_one_or_none()
+    
+    if not clinic:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinic not found"
+        )
+    
+    # Validate modules
+    active_modules = modules_data.get("active_modules", [])
+    if not isinstance(active_modules, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="active_modules must be a list"
+        )
+    
+    # Validate each module
+    for module in active_modules:
+        if module not in AVAILABLE_MODULES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid module: {module}. Available modules: {AVAILABLE_MODULES}"
+            )
+    
+    # Update modules
+    clinic.active_modules = active_modules
+    await db.commit()
+    await db.refresh(clinic)
+    
+    # Return updated clinic
+    from datetime import date as date_type
+    created_at_date = clinic.created_at.date() if clinic.created_at else date_type.today()
+    updated_at_date = clinic.updated_at.date() if clinic.updated_at else None
+    
+    return ClinicResponse(
+        id=clinic.id,
+        name=clinic.name,
+        legal_name=clinic.legal_name,
+        tax_id=clinic.tax_id,
+        address=clinic.address,
+        phone=clinic.phone,
+        email=clinic.email,
+        is_active=clinic.is_active,
+        license_key=clinic.license_key,
+        expiration_date=clinic.expiration_date,
+        max_users=clinic.max_users,
+        active_modules=clinic.active_modules or [],
+        created_at=created_at_date,
+        updated_at=updated_at_date,
+    )
 
 
 @router.patch("/clinics/{clinic_id}/modules", response_model=ClinicResponse)

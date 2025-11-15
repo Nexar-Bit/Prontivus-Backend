@@ -1096,6 +1096,277 @@ async def update_preauth_request(
 
 # ==================== Accounts Receivable ====================
 
+@router.get("/doctor/accounts-receivable", response_model=List[dict])
+async def get_doctor_accounts_receivable(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+    status: Optional[InvoiceStatus] = Query(None, description="Filter by invoice status"),
+):
+    """
+    Get accounts receivable for the current doctor
+    Returns invoices from appointments where the doctor is the assigned doctor
+    """
+    from datetime import date as date_type
+    from decimal import Decimal
+    
+    # Only allow doctors to access this endpoint
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for doctors"
+        )
+    
+    # Get invoices for appointments where the doctor is assigned
+    invoices_query = select(Invoice, Patient, Appointment).join(
+        Patient, Invoice.patient_id == Patient.id
+    ).join(
+        Appointment, Invoice.appointment_id == Appointment.id
+    ).options(
+        selectinload(Invoice.payments)
+    ).filter(
+        and_(
+            Appointment.doctor_id == current_user.id,
+            Appointment.clinic_id == current_user.clinic_id
+        )
+    )
+    
+    # Apply status filter
+    if status:
+        invoices_query = invoices_query.filter(Invoice.status == status)
+    
+    result = await db.execute(invoices_query)
+    invoices_data = result.all()
+    
+    receivables = []
+    today = date_type.today()
+    
+    for invoice, patient, appointment in invoices_data:
+        # Calculate paid amount
+        paid_amount = Decimal('0.00')
+        if invoice.payments:
+            paid_amount = sum(
+                Decimal(str(p.amount)) 
+                for p in invoice.payments 
+                if p.status == PaymentStatus.COMPLETED
+            )
+        
+        # Calculate outstanding amount
+        outstanding = Decimal(str(invoice.total_amount)) - paid_amount
+        
+        # Determine status
+        invoice_status = invoice.status.value if hasattr(invoice.status, 'value') else str(invoice.status)
+        
+        # Check if overdue
+        due_date = invoice.due_date or invoice.issue_date.date()
+        days_overdue = (today - due_date).days if isinstance(due_date, date_type) else 0
+        
+        # Determine display status
+        if paid_amount >= Decimal(str(invoice.total_amount)):
+            display_status = "Pago"
+        elif days_overdue > 0 and invoice_status != "paid":
+            display_status = "Atrasado"
+        elif invoice_status in ["draft", "issued"]:
+            display_status = "Pendente"
+        else:
+            display_status = invoice_status.capitalize()
+        
+        # Get patient name
+        patient_name = f"{patient.first_name or ''} {patient.last_name or ''}".strip()
+        if not patient_name:
+            patient_name = patient.email or "Paciente"
+        
+        receivables.append({
+            "id": invoice.id,
+            "patient_id": patient.id,
+            "patient_name": patient_name,
+            "amount": float(invoice.total_amount),
+            "paid_amount": float(paid_amount),
+            "outstanding_amount": float(outstanding),
+            "due_date": due_date.isoformat() if isinstance(due_date, date_type) else str(due_date),
+            "issue_date": invoice.issue_date.isoformat() if invoice.issue_date else None,
+            "status": display_status,
+            "invoice_status": invoice_status,
+            "days_overdue": days_overdue,
+            "appointment_id": appointment.id if appointment else None,
+        })
+    
+    # Sort by due date (oldest first) or by days overdue
+    receivables.sort(key=lambda x: (x["days_overdue"], x["due_date"]), reverse=True)
+    
+    return receivables
+
+
+@router.get("/doctor/delinquency", response_model=List[dict])
+async def get_doctor_delinquency(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+    min_days_overdue: int = Query(1, ge=0, description="Minimum days overdue to include (default: 1)"),
+):
+    """
+    Get delinquency (overdue accounts) for the current doctor
+    Returns only invoices that are overdue and have outstanding amounts
+    """
+    from datetime import date as date_type
+    from decimal import Decimal
+    
+    # Only allow doctors to access this endpoint
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for doctors"
+        )
+    
+    # Get invoices for appointments where the doctor is assigned
+    invoices_query = select(Invoice, Patient, Appointment).join(
+        Patient, Invoice.patient_id == Patient.id
+    ).join(
+        Appointment, Invoice.appointment_id == Appointment.id
+    ).options(
+        selectinload(Invoice.payments)
+    ).filter(
+        and_(
+            Appointment.doctor_id == current_user.id,
+            Appointment.clinic_id == current_user.clinic_id
+        )
+    )
+    
+    result = await db.execute(invoices_query)
+    invoices_data = result.all()
+    
+    delinquency = []
+    today = date_type.today()
+    total_delinquency = Decimal('0.00')
+    
+    for invoice, patient, appointment in invoices_data:
+        # Calculate paid amount
+        paid_amount = Decimal('0.00')
+        if invoice.payments:
+            paid_amount = sum(
+                Decimal(str(p.amount)) 
+                for p in invoice.payments 
+                if p.status == PaymentStatus.COMPLETED
+            )
+        
+        # Calculate outstanding amount
+        outstanding = Decimal(str(invoice.total_amount)) - paid_amount
+        
+        # Only include if there's an outstanding amount
+        if outstanding <= 0:
+            continue
+        
+        # Check if overdue
+        if invoice.due_date:
+            due_date = invoice.due_date.date() if hasattr(invoice.due_date, 'date') else invoice.due_date
+        elif invoice.issue_date:
+            due_date = invoice.issue_date.date() if hasattr(invoice.issue_date, 'date') else invoice.issue_date
+        else:
+            continue
+        
+        if not isinstance(due_date, date_type):
+            continue
+        
+        days_overdue = (today - due_date).days
+        
+        # Only include if overdue by at least min_days_overdue
+        if days_overdue < min_days_overdue:
+            continue
+        
+        # Get patient name
+        patient_name = f"{patient.first_name or ''} {patient.last_name or ''}".strip()
+        if not patient_name:
+            patient_name = patient.email or "Paciente"
+        
+        total_delinquency += outstanding
+        
+        delinquency.append({
+            "id": invoice.id,
+            "patient_id": patient.id,
+            "patient_name": patient_name,
+            "amount": float(outstanding),  # Use outstanding amount, not total
+            "total_amount": float(invoice.total_amount),
+            "paid_amount": float(paid_amount),
+            "due_date": due_date.isoformat(),
+            "issue_date": invoice.issue_date.isoformat() if invoice.issue_date else None,
+            "days_overdue": days_overdue,
+            "appointment_id": appointment.id if appointment else None,
+        })
+    
+    # Sort by days overdue (most overdue first)
+    delinquency.sort(key=lambda x: x["days_overdue"], reverse=True)
+    
+    return delinquency
+
+
+@router.get("/doctor/accounts-payable", response_model=List[dict])
+async def get_doctor_accounts_payable(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+    status: Optional[str] = Query(None, description="Filter by status (pending, paid)"),
+):
+    """
+    Get accounts payable for the current doctor
+    Returns expenses/bills for the doctor
+    
+    Note: Currently returns empty list as there's no expense model yet.
+    This endpoint is ready to be extended when an Expense model is created.
+    """
+    from datetime import date as date_type
+    
+    # Only allow doctors to access this endpoint
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for doctors"
+        )
+    
+    # TODO: When Expense model is created, implement the following:
+    # - Get expenses for the current doctor
+    # - Filter by status if provided
+    # - Calculate days overdue
+    # - Return list of expenses with details
+    
+    # For now, return empty list
+    # This structure can be used when Expense model is implemented:
+    """
+    expenses_query = select(Expense).filter(
+        and_(
+            Expense.doctor_id == current_user.id,
+            Expense.clinic_id == current_user.clinic_id
+        )
+    )
+    
+    if status:
+        if status == "pending":
+            expenses_query = expenses_query.filter(Expense.status == ExpenseStatus.PENDING)
+        elif status == "paid":
+            expenses_query = expenses_query.filter(Expense.status == ExpenseStatus.PAID)
+    
+    result = await db.execute(expenses_query)
+    expenses = result.scalars().all()
+    
+    payables = []
+    today = date_type.today()
+    
+    for expense in expenses:
+        due_date = expense.due_date.date() if hasattr(expense.due_date, 'date') else expense.due_date
+        days_overdue = (today - due_date).days if isinstance(due_date, date_type) else 0
+        
+        payables.append({
+            "id": expense.id,
+            "description": expense.description,
+            "amount": float(expense.amount),
+            "due_date": due_date.isoformat() if isinstance(due_date, date_type) else str(due_date),
+            "status": expense.status.value if hasattr(expense.status, 'value') else str(expense.status),
+            "days_overdue": days_overdue,
+            "category": expense.category if hasattr(expense, 'category') else None,
+        })
+    
+    return payables
+    """
+    
+    return []
+
+
 @router.get("/accounts-receivable/summary", response_model=AccountsReceivableSummary)
 async def get_accounts_receivable_summary(
     current_user: User = Depends(get_current_user),

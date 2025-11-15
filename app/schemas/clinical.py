@@ -125,7 +125,9 @@ class PatientClinicalHistoryResponse(BaseModel):
     appointment_id: int
     appointment_date: datetime.datetime
     doctor_name: str
+    patient_name: Optional[str] = None
     appointment_type: Optional[str]
+    status: Optional[str] = None
     clinical_record: Optional[ClinicalRecordDetailResponse]
     
     class Config:

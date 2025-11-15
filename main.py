@@ -10,7 +10,7 @@ import os
 import json
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, fiscal_config, reports, payment_methods, report_config
 from app.api.endpoints import icd10
 
 # Import security middleware
@@ -260,6 +260,9 @@ app.include_router(procedures.router, prefix=API_V1_PREFIX, tags=["Procedures"])
 app.include_router(analytics.router, prefix=API_V1_PREFIX, tags=["Analytics"])
 app.include_router(admin.router, prefix=API_V1_PREFIX, tags=["Admin"])
 app.include_router(licenses.router, prefix=API_V1_PREFIX, tags=["Licenses"])
+app.include_router(ai_config.router, prefix=API_V1_PREFIX, tags=["AI Configuration"])
+app.include_router(fiscal_config.router, prefix=API_V1_PREFIX, tags=["Fiscal Configuration"])
+app.include_router(reports.router, prefix=API_V1_PREFIX, tags=["Reports"])
 app.include_router(icd10.router, prefix=API_V1_PREFIX, tags=["ICD-10"])
 app.include_router(voice.router, prefix=API_V1_PREFIX, tags=["Voice"])
 app.include_router(migration.router, prefix=API_V1_PREFIX, tags=["Migration"])
@@ -273,6 +276,10 @@ app.include_router(messages.router, prefix=API_V1_PREFIX, tags=["Messages"])
 app.include_router(menu.router, prefix=API_V1_PREFIX, tags=["Menu Management"])
 app.include_router(rbac_test.router, prefix=API_V1_PREFIX, tags=["RBAC Testing"])
 app.include_router(patient_dashboard.router, prefix=API_V1_PREFIX, tags=["Patient Dashboard"])
+app.include_router(secretary_dashboard.router, prefix=API_V1_PREFIX, tags=["Secretary Dashboard"])
+app.include_router(doctor_dashboard.router, prefix=API_V1_PREFIX, tags=["Doctor Dashboard"])
+app.include_router(payment_methods.router, prefix=API_V1_PREFIX, tags=["Payment Methods"])
+app.include_router(report_config.router, prefix=API_V1_PREFIX, tags=["Report Config"])
 
 # Legacy /api routes for backward compatibility (deprecated)
 # TODO: Remove in v2.0.0
@@ -301,6 +308,10 @@ app.include_router(user_settings.router, prefix="/api", tags=["User Settings (Le
 app.include_router(messages.router, prefix="/api", tags=["Messages (Legacy)"], deprecated=True)
 app.include_router(menu.router, prefix="/api", tags=["Menu Management (Legacy)"], deprecated=True)
 app.include_router(patient_dashboard.router, prefix="/api", tags=["Patient Dashboard (Legacy)"], deprecated=True)
+app.include_router(secretary_dashboard.router, prefix="/api", tags=["Secretary Dashboard (Legacy)"], deprecated=True)
+app.include_router(doctor_dashboard.router, prefix="/api", tags=["Doctor Dashboard (Legacy)"], deprecated=True)
+app.include_router(payment_methods.router, prefix="/api", tags=["Payment Methods (Legacy)"], deprecated=True)
+app.include_router(report_config.router, prefix="/api", tags=["Report Config (Legacy)"], deprecated=True)
 
 @app.get("/")
 async def root():

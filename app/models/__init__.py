@@ -322,6 +322,8 @@ from app.models.push_subscription import PushSubscription
 # Import message models
 from app.models.message import MessageThread, Message, MessageStatus
 from app.models.menu import UserRole as UserRoleModel, MenuGroup, MenuItem
+from app.models.payment_method_config import PaymentMethodConfig
+from app.models.report_config import ReportConfig
 
 # Export all models
 __all__ = [
@@ -386,5 +388,7 @@ __all__ = [
     "UserRoleModel",
     "MenuGroup",
     "MenuItem",
+    "PaymentMethodConfig",
+    "ReportConfig",
 ]
 

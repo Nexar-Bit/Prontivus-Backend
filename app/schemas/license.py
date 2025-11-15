@@ -66,7 +66,7 @@ class LicenseBase(BaseModel):
 
 class LicenseCreate(LicenseBase):
     """License creation schema"""
-    tenant_id: uuid.UUID = Field(..., description="Tenant (clinic) ID")
+    tenant_id: int = Field(..., description="Tenant (clinic) ID")
 
 
 class LicenseUpdate(BaseModel):
@@ -99,7 +99,7 @@ class LicenseUpdate(BaseModel):
 class LicenseResponse(LicenseBase):
     """License response schema"""
     id: uuid.UUID = Field(..., description="License ID")
-    tenant_id: uuid.UUID = Field(..., description="Tenant (clinic) ID")
+    tenant_id: int = Field(..., description="Tenant (clinic) ID")
     activation_key: uuid.UUID = Field(..., description="License activation key")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: Optional[datetime] = Field(None, description="Last update timestamp")
@@ -114,7 +114,7 @@ class LicenseResponse(LicenseBase):
 class LicenseListResponse(BaseModel):
     """License list response schema"""
     id: uuid.UUID
-    tenant_id: uuid.UUID
+    tenant_id: int
     plan: LicensePlan
     status: LicenseStatus
     users_limit: int

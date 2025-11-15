@@ -147,6 +147,70 @@ async def list_appointments(
     return response
 
 
+@router.get("/doctor/my-appointments", response_model=List[AppointmentListResponse])
+async def get_my_doctor_appointments(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+    start_date: Optional[datetime.date] = Query(None),
+    end_date: Optional[datetime.date] = Query(None),
+    status: Optional[AppointmentStatus] = Query(None),
+):
+    """
+    Get appointments for the current doctor - automatically filters by doctor_id
+    This endpoint is accessible to doctors only
+    """
+    # Only allow doctors to access this endpoint
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for doctors"
+        )
+    
+    query = select(Appointment, Patient, User).join(
+        Patient, Appointment.patient_id == Patient.id
+    ).join(
+        User, Appointment.doctor_id == User.id
+    ).filter(
+        and_(
+            Appointment.doctor_id == current_user.id,
+            Appointment.clinic_id == current_user.clinic_id
+        )
+    )
+    
+    # Apply filters
+    if start_date:
+        start_datetime = datetime.datetime.combine(start_date, datetime.time.min)
+        query = query.filter(Appointment.scheduled_datetime >= start_datetime)
+    
+    if end_date:
+        end_datetime = datetime.datetime.combine(end_date, datetime.time.max)
+        query = query.filter(Appointment.scheduled_datetime <= end_datetime)
+    
+    if status:
+        query = query.filter(Appointment.status == status)
+    
+    query = query.order_by(Appointment.scheduled_datetime)
+    
+    result = await db.execute(query)
+    appointments_data = result.all()
+    
+    # Build response with patient and doctor names
+    response = []
+    for appointment, patient, doctor in appointments_data:
+        response.append(AppointmentListResponse(
+            id=appointment.id,
+            scheduled_datetime=appointment.scheduled_datetime,
+            status=appointment.status,
+            appointment_type=appointment.appointment_type,
+            patient_id=appointment.patient_id,
+            doctor_id=appointment.doctor_id,
+            patient_name=f"{patient.first_name} {patient.last_name}".strip() or patient.email or "Paciente",
+            doctor_name=f"{doctor.first_name} {doctor.last_name}".strip() or doctor.username or "Médico",
+        ))
+    
+    return response
+
+
 @router.get("/patient-appointments", response_model=List[AppointmentListResponse])
 async def get_patient_appointments(
     current_user: User = Depends(get_current_user),
@@ -718,6 +782,110 @@ async def update_appointment(
     return response
 
 
+@router.get("/doctor/queue", response_model=List[dict])
+async def get_doctor_queue(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get the queue of patients for the current doctor
+    Returns patients with status CHECKED_IN (waiting) and IN_CONSULTATION (in consultation)
+    """
+    from datetime import timezone as tz
+    
+    # Only allow doctors to access this endpoint
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for doctors"
+        )
+    
+    now = datetime.datetime.now(tz.utc)
+    
+    # Get all appointments for today with status CHECKED_IN or IN_CONSULTATION
+    queue_query = select(Appointment, Patient).join(
+        Patient, Appointment.patient_id == Patient.id
+    ).filter(
+        and_(
+            Appointment.doctor_id == current_user.id,
+            Appointment.clinic_id == current_user.clinic_id,
+            Appointment.status.in_([
+                AppointmentStatus.CHECKED_IN,
+                AppointmentStatus.IN_CONSULTATION
+            ]),
+            # Only today's appointments
+            Appointment.scheduled_datetime >= now.replace(hour=0, minute=0, second=0, microsecond=0),
+            Appointment.scheduled_datetime < (now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1))
+        )
+    ).order_by(
+        # IN_CONSULTATION first, then by scheduled_datetime
+        Appointment.status.desc(),
+        Appointment.scheduled_datetime
+    )
+    
+    result = await db.execute(queue_query)
+    appointments_data = result.all()
+    
+    queue_items = []
+    for appointment, patient in appointments_data:
+        # Calculate wait time
+        wait_time_minutes = 0
+        wait_time_str = "0 min"
+        
+        if appointment.status == AppointmentStatus.CHECKED_IN:
+            # Calculate from checked_in_at or scheduled_datetime
+            if appointment.checked_in_at:
+                wait_start = appointment.checked_in_at
+            else:
+                wait_start = appointment.scheduled_datetime
+            
+            if wait_start:
+                # Make timezone-aware if needed
+                if wait_start.tzinfo is None:
+                    wait_start = wait_start.replace(tzinfo=tz.utc)
+                
+                wait_delta = now - wait_start
+                wait_time_minutes = int(wait_delta.total_seconds() / 60)
+                wait_time_str = f"{wait_time_minutes} min"
+        elif appointment.status == AppointmentStatus.IN_CONSULTATION:
+            # Calculate from started_at
+            if appointment.started_at:
+                wait_start = appointment.started_at
+                if wait_start.tzinfo is None:
+                    wait_start = wait_start.replace(tzinfo=tz.utc)
+                
+                wait_delta = now - wait_start
+                wait_time_minutes = int(wait_delta.total_seconds() / 60)
+                wait_time_str = f"{wait_time_minutes} min"
+        
+        # Get patient name
+        patient_name = f"{patient.first_name or ''} {patient.last_name or ''}".strip()
+        if not patient_name:
+            patient_name = patient.email or "Paciente"
+        
+        # Format appointment time
+        apt_datetime = appointment.scheduled_datetime
+        if apt_datetime.tzinfo is None:
+            apt_datetime = apt_datetime.replace(tzinfo=tz.utc)
+        appointment_time = apt_datetime.strftime("%H:%M")
+        
+        queue_items.append({
+            "id": appointment.id,
+            "patient_id": patient.id,
+            "patient_name": patient_name,
+            "appointment_time": appointment_time,
+            "scheduled_datetime": appointment.scheduled_datetime.isoformat(),
+            "wait_time": wait_time_str,
+            "wait_time_minutes": wait_time_minutes,
+            "status": appointment.status.value if hasattr(appointment.status, 'value') else str(appointment.status),
+            "appointment_type": appointment.appointment_type,
+            "checked_in_at": appointment.checked_in_at.isoformat() if appointment.checked_in_at else None,
+            "started_at": appointment.started_at.isoformat() if appointment.started_at else None,
+        })
+    
+    return queue_items
+
+
 @router.patch("/{appointment_id}/status", response_model=AppointmentResponse)
 async def update_appointment_status(
     appointment_id: int,
@@ -728,6 +896,8 @@ async def update_appointment_status(
     """
     Update appointment status (check-in, start consultation, complete, cancel)
     """
+    from datetime import timezone as tz
+    
     query = select(Appointment).filter(
         and_(
             Appointment.id == appointment_id,
@@ -743,7 +913,22 @@ async def update_appointment_status(
             detail="Appointment not found"
         )
     
+    # Update status and timestamps
+    old_status = db_appointment.status
     db_appointment.status = status_update.status
+    now = datetime.datetime.now(tz.utc)
+    
+    # Update timestamps based on status
+    if status_update.status == AppointmentStatus.CHECKED_IN:
+        if not db_appointment.checked_in_at:
+            db_appointment.checked_in_at = now
+    elif status_update.status == AppointmentStatus.IN_CONSULTATION:
+        if not db_appointment.started_at:
+            db_appointment.started_at = now
+    elif status_update.status == AppointmentStatus.COMPLETED:
+        if not db_appointment.completed_at:
+            db_appointment.completed_at = now
+    
     await db.commit()
     await db.refresh(db_appointment)
     
