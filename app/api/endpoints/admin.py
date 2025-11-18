@@ -2,7 +2,7 @@
 Admin API endpoints for clinic management and licensing
 """
 
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select, func, and_, or_
@@ -19,6 +19,7 @@ from app.schemas.clinic import (
     ClinicLicenseUpdate, ClinicStatsResponse
 )
 from app.core.auth import get_current_user, RoleChecker
+from app.core.security import hash_password
 from app.core.licensing import AVAILABLE_MODULES
 from typing import Dict, Any
 from sqlalchemy.exc import SQLAlchemyError
@@ -651,10 +652,148 @@ async def create_clinic(
     # Create clinic
     clinic = Clinic(**clinic_data.model_dump())
     db.add(clinic)
+    await db.flush()  # Flush to get clinic.id without committing
+    
+    # Get AdminClinica role (role_id = 2)
+    admin_role_query = await db.execute(
+        select(UserRole).where(UserRole.name == "AdminClinica")
+    )
+    admin_role = admin_role_query.scalar_one_or_none()
+    
+    if not admin_role:
+        # If AdminClinica role doesn't exist, rollback and raise error
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="AdminClinica role not found. Please run seed script first."
+        )
+    
+    # Generate default admin user credentials
+    # Use clinic name to create username (sanitized)
+    clinic_name_slug = clinic_data.name.lower().replace(" ", "_").replace("-", "_")
+    # Remove special characters, keep only alphanumeric and underscore
+    clinic_name_slug = "".join(c for c in clinic_name_slug if c.isalnum() or c == "_")
+    # Limit length and ensure uniqueness
+    base_username = f"admin_{clinic_name_slug[:20]}"
+    
+    # Check if username already exists, if so append clinic id
+    username = base_username
+    counter = 1
+    while True:
+        existing_user = await db.execute(
+            select(User).where(User.username == username)
+        )
+        if not existing_user.scalar_one_or_none():
+            break
+        username = f"{base_username}_{counter}"
+        counter += 1
+    
+    # Generate email from clinic email or use default pattern
+    admin_email = clinic_data.email if clinic_data.email else f"admin@{clinic_name_slug}.com"
+    # Ensure email uniqueness
+    email_counter = 1
+    original_email = admin_email
+    while True:
+        existing_email = await db.execute(
+            select(User).where(User.email == admin_email)
+        )
+        if not existing_email.scalar_one_or_none():
+            break
+        # Extract domain and add counter
+        if "@" in original_email:
+            local, domain = original_email.split("@", 1)
+            admin_email = f"{local}{email_counter}@{domain}"
+        else:
+            admin_email = f"admin{email_counter}@{clinic_name_slug}.com"
+        email_counter += 1
+    
+    # Generate default password: clinic name + "123!" (user should change on first login)
+    default_password = f"{clinic_data.name.replace(' ', '')}123!"
+    # Ensure password meets minimum requirements (at least 8 chars)
+    if len(default_password) < 8:
+        default_password = f"{clinic_data.name.replace(' ', '')}Admin123!"
+    
+    # Create AdminClinica user for the new clinic
+    admin_user = User(
+        username=username,
+        email=admin_email,
+        hashed_password=hash_password(default_password),
+        first_name="Administrador",
+        last_name=clinic_data.name,
+        role=UserRole.ADMIN,  # Legacy enum
+        role_id=admin_role.id,  # AdminClinica role_id = 2
+        clinic_id=clinic.id,
+        is_active=True,
+        is_verified=True,  # Auto-verify the admin user
+    )
+    db.add(admin_user)
+    
+    # Commit both clinic and user
     await db.commit()
     await db.refresh(clinic)
+    await db.refresh(admin_user)
     
-    return clinic
+    # Log the creation
+    try:
+        log_entry = SystemLog(
+            clinic_id=clinic.id,
+            user_id=current_user.id if current_user else None,
+            action="clinic_created",
+            details={
+                "clinic_id": clinic.id,
+                "clinic_name": clinic.name,
+                "admin_user_created": True,
+                "admin_username": username,
+                "admin_email": admin_email,
+            },
+            severity="INFO"
+        )
+        db.add(log_entry)
+        await db.commit()
+    except Exception as e:
+        # Don't fail clinic creation if logging fails
+        print(f"Warning: Failed to log clinic creation: {e}")
+    
+    # Build response with admin user info
+    def to_date(dt_value):
+        if dt_value is None:
+            return None
+        if isinstance(dt_value, date):
+            return dt_value
+        if isinstance(dt_value, datetime):
+            if dt_value.tzinfo is not None:
+                dt_value = dt_value.astimezone(timezone.utc)
+            return date(dt_value.year, dt_value.month, dt_value.day)
+        return date.today()
+    
+    response_dict = {
+        "id": clinic.id,
+        "name": clinic.name,
+        "legal_name": clinic.legal_name,
+        "tax_id": clinic.tax_id,
+        "address": clinic.address,
+        "phone": clinic.phone,
+        "email": clinic.email,
+        "is_active": clinic.is_active,
+        "license_key": clinic.license_key,
+        "expiration_date": clinic.expiration_date,
+        "max_users": clinic.max_users,
+        "active_modules": clinic.active_modules or [],
+        "created_at": to_date(getattr(clinic, "created_at", None)) or date.today(),
+        "updated_at": to_date(getattr(clinic, "updated_at", None)),
+    }
+    
+    # Add admin user info to response (will be accessible but not in schema)
+    clinic_response = ClinicResponse.model_construct(**response_dict)
+    # Store admin user info as attribute (can be accessed but won't break schema validation)
+    clinic_response.admin_user = {
+        "username": username,
+        "email": admin_email,
+        "password": default_password,  # Include password so SuperAdmin can share it
+        "role": "AdminClinica"
+    }
+    
+    return clinic_response
 
 
 @router.put("/clinics/{clinic_id}", response_model=ClinicResponse)
