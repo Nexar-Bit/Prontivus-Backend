@@ -943,14 +943,16 @@ async def delete_clinic(
                     await db.rollback()
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Erro ao deletar {table_name}: Transação abortada. Um comando anterior falhou. Erro: {str(e)}"
+                        detail=f"Erro ao processar exclusão de {table_name}. A operação foi interrompida. Por favor, tente novamente."
                     )
-                # For other errors, rollback and re-raise
+                # For foreign key errors, provide a user-friendly message
+                if "foreign key" in error_msg or "constraint" in error_msg or "violates foreign key" in error_msg:
+                    await db.rollback()
+                    # This will be caught by the outer exception handler which has better messaging
+                    raise
+                # For other errors, rollback and re-raise (will be caught by outer handler)
                 await db.rollback()
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Erro ao deletar {table_name}: {str(e)}"
-                )
+                raise
         
         # Delete in correct order to respect foreign key constraints
         # 1. Delete clinical records, prescriptions, diagnoses first (they reference appointments)
@@ -1136,13 +1138,53 @@ async def delete_clinic(
             
             # Check for foreign key constraint errors
             if "foreign key" in error_msg.lower() or "constraint" in error_msg.lower() or "violates foreign key" in error_msg.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Não é possível excluir a clínica: existem registros relacionados que impedem a exclusão. Por favor, verifique se todos os registros relacionados foram deletados. Erro detalhado: {error_msg}"
-                )
+                # Try to extract the table name from the error message
+                table_name = None
+                table_display_name = None
+                
+                # Common table mappings for better user messages
+                table_mappings = {
+                    "licenses": "licenças",
+                    "users": "usuários",
+                    "patients": "pacientes",
+                    "appointments": "agendamentos",
+                    "invoices": "faturas",
+                    "products": "produtos",
+                    "stock_movements": "movimentações de estoque",
+                    "procedures": "procedimentos",
+                    "messages": "mensagens",
+                    "message_threads": "conversas",
+                }
+                
+                # Extract table name from error message
+                error_lower = error_msg.lower()
+                for table, display_name in table_mappings.items():
+                    # Check for various patterns in the error message
+                    if (f'"{table}"' in error_lower or 
+                        f"table \"{table}\"" in error_lower or 
+                        f"on table \"{table}\"" in error_lower or
+                        f"from table \"{table}\"" in error_lower or
+                        f"references table \"{table}\"" in error_lower or
+                        f"constraint \"{table}" in error_lower):
+                        table_name = table
+                        table_display_name = display_name
+                        break
+                
+                # If we found a specific table, provide a more helpful message
+                if table_name and table_display_name:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Não é possível excluir esta clínica porque existem {table_display_name} associadas a ela. Para excluir a clínica, você precisa primeiro remover ou transferir todas as {table_display_name} relacionadas. Acesse a seção de {table_display_name} e remova os registros antes de tentar excluir a clínica novamente."
+                    )
+                else:
+                    # Generic message if we can't identify the table
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Não é possível excluir esta clínica porque existem registros relacionados que impedem a exclusão. Para excluir a clínica, você precisa primeiro remover ou transferir todos os registros relacionados (licenças, usuários, pacientes, agendamentos, etc.). Acesse cada seção do sistema e remova os registros antes de tentar excluir a clínica novamente."
+                    )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Erro ao excluir clínica: {error_msg}"
+                detail="Erro ao excluir clínica. Por favor, tente novamente. Se o problema persistir, entre em contato com o suporte."
             )
         
     except HTTPException:
@@ -1158,19 +1200,59 @@ async def delete_clinic(
         
         # Check for foreign key constraint errors
         if "foreign key" in error_msg.lower() or "constraint" in error_msg.lower() or "violates foreign key" in error_msg.lower():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Não é possível excluir a clínica: existem registros relacionados que impedem a exclusão. Por favor, verifique se todos os registros relacionados foram deletados. Erro: {error_msg}"
-            )
+            # Try to extract the table name from the error message
+            table_name = None
+            table_display_name = None
+            
+            # Common table mappings for better user messages
+            table_mappings = {
+                "licenses": "licenças",
+                "users": "usuários",
+                "patients": "pacientes",
+                "appointments": "agendamentos",
+                "invoices": "faturas",
+                "products": "produtos",
+                "stock_movements": "movimentações de estoque",
+                "procedures": "procedimentos",
+                "messages": "mensagens",
+                "message_threads": "conversas",
+            }
+            
+            # Extract table name from error message
+            error_lower = error_msg.lower()
+            for table, display_name in table_mappings.items():
+                # Check for various patterns in the error message
+                if (f'"{table}"' in error_lower or 
+                    f"table \"{table}\"" in error_lower or 
+                    f"on table \"{table}\"" in error_lower or
+                    f"from table \"{table}\"" in error_lower or
+                    f"references table \"{table}\"" in error_lower or
+                    f"constraint \"{table}" in error_lower):
+                    table_name = table
+                    table_display_name = display_name
+                    break
+            
+            # If we found a specific table, provide a more helpful message
+            if table_name and table_display_name:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Não é possível excluir esta clínica porque existem {table_display_name} associadas a ela. Para excluir a clínica, você precisa primeiro remover ou transferir todas as {table_display_name} relacionadas. Acesse a seção de {table_display_name} e remova os registros antes de tentar excluir a clínica novamente."
+                )
+            else:
+                # Generic message if we can't identify the table
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Não é possível excluir esta clínica porque existem registros relacionados que impedem a exclusão. Para excluir a clínica, você precisa primeiro remover ou transferir todos os registros relacionados (licenças, usuários, pacientes, agendamentos, etc.). Acesse cada seção do sistema e remova os registros antes de tentar excluir a clínica novamente."
+                )
         # Check for missing table errors
         if "does not exist" in error_msg.lower() or "undefinedtable" in error_msg.lower():
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Erro ao excluir clínica: Tabela não encontrada no banco de dados. Por favor, verifique as migrações do banco de dados. Erro: {error_msg}"
+                detail="Erro ao excluir clínica: Tabela não encontrada no banco de dados. Por favor, verifique as migrações do banco de dados ou entre em contato com o suporte técnico."
             )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro ao excluir clínica: {error_msg}"
+            detail="Erro ao excluir clínica. Por favor, tente novamente. Se o problema persistir, entre em contato com o suporte."
         )
     
     return {"message": "Clinic deleted successfully"}
