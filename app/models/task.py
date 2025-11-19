@@ -28,7 +28,7 @@ class Task(Base):
     # Task Details
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    priority = Column(SQLEnum(TaskPriority), nullable=False, default=TaskPriority.MEDIUM, index=True)
+    priority = Column(SQLEnum(TaskPriority, native_enum=False), nullable=False, default=TaskPriority.MEDIUM.value, index=True)
     completed = Column(Boolean, default=False, nullable=False, index=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     due_date = Column(DateTime(timezone=True), nullable=True, index=True)

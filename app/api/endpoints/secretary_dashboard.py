@@ -460,18 +460,38 @@ async def create_task(
 ):
     """Create a new task"""
     try:
-        # Validate priority
+        # Validate priority - map common variations
         priority_value = TaskPriority.MEDIUM
         if task_data.priority:
+            priority_str = str(task_data.priority).strip()
+            # Map common variations to enum values
+            priority_map = {
+                "baixa": TaskPriority.LOW,
+                "média": TaskPriority.MEDIUM,
+                "alta": TaskPriority.HIGH,
+                "low": TaskPriority.LOW,
+                "medium": TaskPriority.MEDIUM,
+                "high": TaskPriority.HIGH,
+            }
+            # Try direct match first
             try:
-                priority_value = TaskPriority(task_data.priority)
+                priority_value = TaskPriority(priority_str)
             except ValueError:
-                priority_value = TaskPriority.MEDIUM
+                # Try case-insensitive match
+                priority_lower = priority_str.lower()
+                if priority_lower in priority_map:
+                    priority_value = priority_map[priority_lower]
+                else:
+                    # Default to MEDIUM if no match
+                    priority_value = TaskPriority.MEDIUM
+        
+        # Ensure we use the enum value (string) not the enum name
+        priority_for_db = priority_value.value if isinstance(priority_value, TaskPriority) else priority_value
         
         new_task = Task(
             title=task_data.title,
             description=task_data.description,
-            priority=priority_value,
+            priority=priority_for_db,
             completed=False,
             user_id=current_user.id,
             clinic_id=current_user.clinic_id,
@@ -498,11 +518,26 @@ async def create_task(
     except Exception as e:
         import logging
         logger = logging.getLogger(__name__)
-        logger.error(f"Error in create_task: {str(e)}", exc_info=True)
+        error_msg = str(e)
+        logger.error(f"Error in create_task: {error_msg}", exc_info=True)
         await db.rollback()
+        
+        # Provide more detailed error message
+        if "does not exist" in error_msg or "no such table" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Tabela de tarefas não encontrada. Execute a migração do banco de dados."
+            )
+        
+        if "clinic_id" in error_msg.lower() or "RequireRole" in error_msg or "RoleChecker" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Erro de autenticação: {error_msg}"
+            )
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erro ao criar tarefa"
+            detail=f"Erro ao criar tarefa: {error_msg}"
         )
 
 
