@@ -90,7 +90,7 @@ class LicenseUpdate(BaseModel):
             valid_modules = [
                 'patients', 'appointments', 'clinical', 'financial', 'stock',
                 'procedures', 'tiss', 'bi', 'telemed', 'mobile', 'api',
-                'reports', 'backup', 'integration'
+                'reports', 'backup', 'integration', 'ai'
             ]
             
             for module in v:

@@ -482,28 +482,68 @@ async def update_license(
     if not license_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="License not found")
     
-    # Update fields
-    update_data = license_update.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(license_obj, field, value)
-    
-    # Re-sign if core fields changed
-    if any(field in update_data for field in ['plan', 'modules', 'users_limit', 'units_limit', 'start_at', 'end_at']):
-        payload = {
-            "tenant_id": str(license_obj.tenant_id),
-            "plan": license_obj.plan if isinstance(license_obj.plan, str) else license_obj.plan.value,
-            "modules": license_obj.modules,
-            "users_limit": license_obj.users_limit,
-            "units_limit": license_obj.units_limit,
-            "start_at": int(license_obj.start_at.replace(tzinfo=timezone.utc).timestamp()),
-            "end_at": int(license_obj.end_at.replace(tzinfo=timezone.utc).timestamp()),
-        }
-        license_obj.signature = _sign_payload(payload)
-    
-    await db.commit()
-    await db.refresh(license_obj)
-    
-    return LicenseResponse.model_validate(license_obj)
+    try:
+        # Update fields
+        update_data = license_update.model_dump(exclude_unset=True)
+        
+        # Validate end_at is after start_at if end_at is being updated
+        if 'end_at' in update_data and license_obj.start_at:
+            if update_data['end_at'] <= license_obj.start_at:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="End date must be after start date"
+                )
+        
+        for field, value in update_data.items():
+            setattr(license_obj, field, value)
+        
+        # Re-sign if core fields changed
+        if any(field in update_data for field in ['plan', 'modules', 'users_limit', 'units_limit', 'end_at']):
+            payload = {
+                "tenant_id": str(license_obj.tenant_id),
+                "plan": license_obj.plan if isinstance(license_obj.plan, str) else license_obj.plan.value,
+                "modules": license_obj.modules,
+                "users_limit": license_obj.users_limit,
+                "units_limit": license_obj.units_limit,
+                "start_at": int(license_obj.start_at.replace(tzinfo=timezone.utc).timestamp()),
+                "end_at": int(license_obj.end_at.replace(tzinfo=timezone.utc).timestamp()),
+            }
+            license_obj.signature = _sign_payload(payload)
+        
+        await db.commit()
+        await db.refresh(license_obj)
+        
+        # Log the update
+        try:
+            security_logger.log_security_event(
+                event_type="license_updated",
+                user_id=current_user.id,
+                username=current_user.username,
+                ip_address=None,
+                description=f"License {license_id} updated",
+                severity="INFO",
+                additional_data={"license_id": str(license_id), "updated_fields": list(update_data.keys())}
+            )
+        except Exception as log_error:
+            # Don't fail update if logging fails
+            print(f"Warning: Failed to log license update: {log_error}")
+        
+        return LicenseResponse.model_validate(license_obj)
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        error_msg = str(e)
+        
+        # Log the error
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error updating license {license_id}: {error_msg}", exc_info=True)
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating license: {error_msg}"
+        )
 
 
 @router.delete("/{license_id}")
