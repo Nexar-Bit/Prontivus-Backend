@@ -235,23 +235,25 @@ async def update_ai_config(
     else:
         target_clinic_id = current_user.clinic_id
     
-    # Check license (SuperAdmin can update even without AI module enabled)
+    # Check license (SuperAdmin can update even without license or AI module enabled)
     is_superadmin = current_user.role == "admin" and current_user.role_id == 1
     license_obj = await _get_clinic_license(db, target_clinic_id, check_ai_module=False)
     
-    if not license_obj:
+    # For non-SuperAdmin, require license
+    if not license_obj and not is_superadmin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Clinic does not have a license"
         )
     
-    # Check if AI module is enabled
-    ai_enabled = "ai" in license_obj.modules or "api" in license_obj.modules
-    if not ai_enabled and not is_superadmin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="AI module is not enabled for this clinic's license. Please enable the AI module in the license first."
-        )
+    # Check if AI module is enabled (only for non-SuperAdmin)
+    if license_obj:
+        ai_enabled = "ai" in license_obj.modules or "api" in license_obj.modules
+        if not ai_enabled and not is_superadmin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="AI module is not enabled for this clinic's license. Please enable the AI module in the license first."
+            )
     
     # Get or create config
     config = await _get_or_create_ai_config(db, target_clinic_id)
@@ -303,15 +305,33 @@ async def update_ai_config(
     result = config.to_dict(include_api_key=True)
     result["api_key"] = api_key
     
-    token_limit = license_obj.ai_token_limit
-    if token_limit is None:
-        token_limit = _get_token_limit_by_plan(license_obj.plan)
-    
-    result["token_limit"] = token_limit
-    result["tokens_remaining"] = (
-        -1 if token_limit == -1
-        else max(0, token_limit - config.get_monthly_token_usage())
-    )
+    # Handle license and token limits
+    if license_obj:
+        token_limit = license_obj.ai_token_limit
+        if token_limit is None:
+            token_limit = _get_token_limit_by_plan(license_obj.plan)
+        
+        ai_enabled = "ai" in license_obj.modules or "api" in license_obj.modules
+        result["ai_module_enabled"] = ai_enabled
+        
+        if ai_enabled:
+            result["token_limit"] = token_limit
+            result["token_limit_type"] = "unlimited" if token_limit == -1 else "limited"
+            result["tokens_remaining"] = (
+                -1 if token_limit == -1
+                else max(0, token_limit - config.get_monthly_token_usage())
+            )
+        else:
+            result["token_limit"] = None
+            result["token_limit_type"] = "disabled"
+            result["tokens_remaining"] = None
+    else:
+        # No license - SuperAdmin can still save but with warnings
+        result["ai_module_enabled"] = False
+        result["token_limit"] = None
+        result["token_limit_type"] = "no_license"
+        result["tokens_remaining"] = None
+        result["warning"] = "Clinic does not have a license. Please create a license and enable the AI module first."
     
     return {
         "message": "AI configuration updated successfully",
