@@ -224,8 +224,19 @@ async def get_thread(
     
     # Mark messages as read
     from sqlalchemy import update
+    read_message_ids = []
     if patient:
         # Mark provider messages as read
+        read_query = select(Message.id).where(
+            and_(
+                Message.thread_id == thread.id,
+                Message.sender_type != "patient",
+                Message.status != MessageStatus.READ.value
+            )
+        )
+        read_result = await db.execute(read_query)
+        read_message_ids = [msg_id for msg_id in read_result.scalars().all()]
+        
         await db.execute(
             update(Message).where(
                 and_(
@@ -237,6 +248,16 @@ async def get_thread(
         )
     else:
         # Mark patient messages as read
+        read_query = select(Message.id).where(
+            and_(
+                Message.thread_id == thread.id,
+                Message.sender_type == "patient",
+                Message.status != MessageStatus.READ.value
+            )
+        )
+        read_result = await db.execute(read_query)
+        read_message_ids = [msg_id for msg_id in read_result.scalars().all()]
+        
         await db.execute(
             update(Message).where(
                 and_(
@@ -247,6 +268,43 @@ async def get_thread(
             ).values(status=MessageStatus.READ.value, read_at=datetime.datetime.now())
         )
     await db.commit()
+    
+    # Broadcast read status updates via WebSocket
+    if read_message_ids:
+        try:
+            from app.api.endpoints.websocket_messages import broadcast_message_read
+            # Get patient's user_id for WebSocket broadcast
+            patient_query = select(Patient).filter(Patient.id == thread.patient_id)
+            patient_result = await db.execute(patient_query)
+            patient = patient_result.scalar_one_or_none()
+            
+            if patient:
+                # Find the patient's User ID (patients and users are linked by email)
+                patient_user_query = select(User).filter(
+                    and_(
+                        User.email == patient.email,
+                        User.clinic_id == current_user.clinic_id,
+                        User.role == UserRole.PATIENT
+                    )
+                )
+                patient_user_result = await db.execute(patient_user_query)
+                patient_user = patient_user_result.scalar_one_or_none()
+                patient_user_id = patient_user.id if patient_user else None
+                
+                if patient_user_id:
+                    for msg_id in read_message_ids:
+                        await broadcast_message_read(
+                            clinic_id=current_user.clinic_id,
+                            thread_id=thread_id,
+                            patient_user_id=patient_user_id,
+                            provider_user_id=thread.provider_id,
+                            message_id=msg_id
+                        )
+        except Exception as e:
+            # Don't fail the request if WebSocket broadcast fails
+            print(f"Error broadcasting read status via WebSocket: {e}")
+            import traceback
+            traceback.print_exc()
     
     return MessageThreadDetailResponse(
         id=thread.id,
@@ -448,8 +506,8 @@ async def send_message(
     await db.commit()
     await db.refresh(message)
     
-    # Ensure status is always a string
-    return MessageResponse(
+    # Prepare message response
+    message_response = MessageResponse(
         id=message.id,
         thread_id=message.thread_id,
         sender_id=message.sender_id,
@@ -461,6 +519,58 @@ async def send_message(
         attachments=message.attachments,
         medical_context=message.medical_context,
     )
+    
+    # Broadcast new message via WebSocket
+    try:
+        from app.api.endpoints.websocket_messages import broadcast_new_message
+        
+        # Get patient info for WebSocket broadcast
+        patient_query = select(Patient).filter(Patient.id == thread.patient_id)
+        patient_result = await db.execute(patient_query)
+        patient = patient_result.scalar_one_or_none()
+        
+        if patient:
+            # Find the patient's User ID (patients and users are linked by email)
+            patient_user_query = select(User).filter(
+                and_(
+                    User.email == patient.email,
+                    User.clinic_id == current_user.clinic_id,
+                    User.role == UserRole.PATIENT
+                )
+            )
+            patient_user_result = await db.execute(patient_user_query)
+            patient_user = patient_user_result.scalar_one_or_none()
+            patient_user_id = patient_user.id if patient_user else None
+            
+            if patient_user_id:
+                # Broadcast to both patient and provider
+                await broadcast_new_message(
+                    clinic_id=current_user.clinic_id,
+                    thread_id=thread_id,
+                    patient_user_id=patient_user_id,
+                    provider_user_id=thread.provider_id,
+                    message_data={
+                        "id": message.id,
+                        "thread_id": message.thread_id,
+                        "sender_id": message.sender_id,
+                        "sender_type": message.sender_type,
+                        "content": message.content,
+                        "status": str(message.status) if message.status else "sent",
+                        "created_at": message.created_at.isoformat() if message.created_at else None,
+                        "read_at": message.read_at.isoformat() if message.read_at else None,
+                        "attachments": message.attachments,
+                        "medical_context": message.medical_context,
+                    }
+                )
+            else:
+                print(f"Warning: Could not find User ID for patient {thread.patient_id} (email: {patient.email})")
+    except Exception as e:
+        # Don't fail the request if WebSocket broadcast fails
+        print(f"Error broadcasting message via WebSocket: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return message_response
 
 
 @router.delete("/threads/{thread_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -10,7 +10,7 @@ import os
 import json
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support
 from app.api.endpoints import icd10
 
 # Import security middleware
@@ -33,6 +33,7 @@ def get_cors_origins():
     return [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:3001",  # Next.js dev server sometimes uses 3001
     ]
 
 @asynccontextmanager
@@ -68,7 +69,7 @@ cors_origins = get_cors_origins()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+" if os.getenv("ENVIRONMENT") == "development" else None,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+" if os.getenv("ENVIRONMENT", "development") == "development" else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -270,6 +271,7 @@ app.include_router(migration.router, prefix=API_V1_PREFIX, tags=["Migration"])
 app.include_router(files.router, prefix=API_V1_PREFIX, tags=["Files"])
 app.include_router(patient_calling.router, prefix=API_V1_PREFIX, tags=["Patient Calling"])
 app.include_router(websocket_calling.router, tags=["WebSocket Calling"])
+app.include_router(websocket_messages.router, tags=["WebSocket Messages"])
 app.include_router(notifications.router, prefix=API_V1_PREFIX, tags=["Notifications"])
 app.include_router(tiss_config.router, prefix=f"{API_V1_PREFIX}/financial", tags=["TISS Config"])
 app.include_router(user_settings.router, prefix=API_V1_PREFIX, tags=["User Settings"])

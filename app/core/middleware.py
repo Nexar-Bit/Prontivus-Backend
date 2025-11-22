@@ -21,6 +21,19 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         self.rate_limit_storage = {}  # In production, use Redis
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Skip WebSocket connections (check scope type)
+        try:
+            scope_type = request.scope.get("type")
+            if scope_type == "websocket":
+                print(f"[SecurityMiddleware] Skipping WebSocket connection: {request.url.path}")
+                return await call_next(request)
+        except Exception as e:
+            # If we can't check scope type, try to continue (might be WebSocket)
+            print(f"[SecurityMiddleware] Error checking scope type: {e}")
+            # For WebSocket, we need to let it through
+            if "websocket" in str(request.url.path).lower() or "/ws/" in request.url.path:
+                return await call_next(request)
+        
         # Start timing
         start_time = time.time()
         
@@ -105,6 +118,15 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
     """Middleware to add user context to requests"""
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Skip WebSocket connections (check scope type)
+        try:
+            if request.scope.get("type") == "websocket":
+                return await call_next(request)
+        except:
+            # If we can't check, let WebSocket paths through
+            if "/ws/" in request.url.path:
+                return await call_next(request)
+        
         # Extract user info from JWT if present
         user_id = None
         username = None
@@ -132,6 +154,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Middleware to add security headers"""
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Skip WebSocket connections (check scope type)
+        if request.scope.get("type") == "websocket":
+            return await call_next(request)
+        
         response = await call_next(request)
         
         # Add security headers
@@ -162,6 +188,10 @@ class LoginAttemptMiddleware(BaseHTTPMiddleware):
     """Middleware to track and limit login attempts"""
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Skip WebSocket connections (check scope type)
+        if request.scope.get("type") == "websocket":
+            return await call_next(request)
+        
         # Check if this is a login endpoint
         if request.url.path.endswith("/login") and request.method == "POST":
             client_ip = get_client_ip(request)
