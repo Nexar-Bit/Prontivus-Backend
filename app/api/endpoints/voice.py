@@ -4,6 +4,7 @@ Handles voice-to-text clinical documentation
 """
 
 import uuid
+import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
@@ -19,6 +20,9 @@ from app.schemas.voice import (
     MedicalTermResponse, VoiceConfigurationResponse, VoiceProcessingResult
 )
 from app.services.voice_processing import voice_service
+from app.services.voice_transcription import voice_transcriber
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Voice Processing"])
 
@@ -461,4 +465,169 @@ async def delete_voice_session(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting voice session: {str(e)}"
+        )
+
+
+# ==================== Direct Transcription Endpoints ====================
+
+@router.post("/voice/transcribe")
+async def transcribe_audio(
+    audio_file: UploadFile = File(...),
+    language: str = Form('pt-BR'),
+    enhance_medical_terms: bool = Form(True),
+    structure_soap: bool = Form(False),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Direct audio transcription endpoint
+    Transcribes audio to text without full voice processing pipeline
+    
+    Args:
+        audio_file: Audio file (WAV, MP3, WebM, etc.)
+        language: Language code (default: pt-BR)
+        enhance_medical_terms: Whether to enhance medical terminology
+        structure_soap: Whether to structure text into SOAP format
+        current_user: Current authenticated user
+    
+    Returns:
+        Transcription result with raw text, enhanced text, and optional SOAP structure
+    """
+    try:
+        # Validate audio file
+        if not audio_file.content_type or not audio_file.content_type.startswith('audio/'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File must be an audio file"
+            )
+        
+        # Read audio data
+        audio_data = await audio_file.read()
+        
+        if len(audio_data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Audio file is empty"
+            )
+        
+        # Transcribe
+        result = await voice_transcriber.transcribe_audio(
+            audio_data,
+            language=language,
+            enhance_medical_terms=enhance_medical_terms,
+            structure_soap=structure_soap
+        )
+        
+        if not result.get('success'):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.get('error', 'Transcription failed')
+            )
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Transcription error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Transcription failed: {str(e)}"
+        )
+
+
+@router.get("/voice/languages")
+async def get_supported_languages(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get list of supported languages for transcription
+    
+    Args:
+        current_user: Current authenticated user
+    
+    Returns:
+        List of supported languages with codes and names
+    """
+    try:
+        languages = voice_transcriber.get_supported_languages()
+        return {
+            "languages": languages,
+            "default": "pt-BR"
+        }
+    except Exception as e:
+        logger.error(f"Error getting supported languages: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get supported languages: {str(e)}"
+        )
+
+
+@router.post("/voice/record")
+async def start_voice_recording(
+    appointment_id: int = Form(...),
+    session_id: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
+):
+    """
+    Start a voice recording session
+    Creates a new voice session for streaming audio
+    
+    Args:
+        appointment_id: ID of the appointment
+        session_id: Optional session ID (will be generated if not provided)
+        current_user: Current authenticated user
+        db: Database session
+    
+    Returns:
+        Session information with session_id
+    """
+    try:
+        # Verify appointment exists and user has access
+        appointment_query = select(Appointment).where(
+            Appointment.id == appointment_id,
+            Appointment.clinic_id == current_user.clinic_id
+        )
+        appointment_result = await db.execute(appointment_query)
+        appointment = appointment_result.scalar_one_or_none()
+        
+        if not appointment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Appointment not found or access denied"
+            )
+        
+        # Generate session ID if not provided
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        
+        # Create voice session
+        voice_session = VoiceSession(
+            session_id=session_id,
+            user_id=current_user.id,
+            appointment_id=appointment_id,
+            encrypted_audio_data=b"",  # Empty initially
+            expires_at=datetime.utcnow() + timedelta(hours=24)
+        )
+        
+        db.add(voice_session)
+        await db.commit()
+        await db.refresh(voice_session)
+        
+        return {
+            "session_id": voice_session.session_id,
+            "appointment_id": voice_session.appointment_id,
+            "created_at": voice_session.created_at.isoformat(),
+            "expires_at": voice_session.expires_at.isoformat(),
+            "message": "Voice recording session started"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error starting voice recording: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start voice recording: {str(e)}"
         )

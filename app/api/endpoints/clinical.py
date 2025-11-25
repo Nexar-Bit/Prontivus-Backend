@@ -456,3 +456,229 @@ async def get_my_doctor_clinical_records(
         ))
     
     return records
+
+
+# ==================== Prescriptions ====================
+
+@router.get(
+    "/clinical-records/{clinical_record_id}/prescriptions",
+    response_model=List[PrescriptionResponse]
+)
+async def get_prescriptions_by_clinical_record(
+    clinical_record_id: int,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get all prescriptions for a specific clinical record
+    """
+    # Verify clinical record exists and belongs to current clinic
+    record_query = select(ClinicalRecord).filter(
+        ClinicalRecord.id == clinical_record_id
+    )
+    record_result = await db.execute(record_query)
+    clinical_record = record_result.scalar_one_or_none()
+    
+    if not clinical_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinical record not found"
+        )
+    
+    # Verify appointment belongs to clinic
+    appointment_query = select(Appointment).filter(
+        Appointment.id == clinical_record.appointment_id,
+        Appointment.clinic_id == current_user.clinic_id
+    )
+    appointment_result = await db.execute(appointment_query)
+    appointment = appointment_result.scalar_one_or_none()
+    
+    if not appointment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    
+    # Get prescriptions
+    prescriptions_query = select(Prescription).filter(
+        Prescription.clinical_record_id == clinical_record_id
+    ).order_by(Prescription.created_at.desc())
+    
+    prescriptions_result = await db.execute(prescriptions_query)
+    prescriptions = prescriptions_result.scalars().all()
+    
+    return prescriptions
+
+
+@router.post(
+    "/clinical-records/{clinical_record_id}/prescriptions",
+    response_model=PrescriptionResponse,
+    status_code=status.HTTP_201_CREATED
+)
+async def create_prescription(
+    clinical_record_id: int,
+    prescription_in: PrescriptionBase,
+    current_user: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a new prescription for a clinical record
+    """
+    # Verify clinical record exists and belongs to current clinic
+    record_query = select(ClinicalRecord).filter(
+        ClinicalRecord.id == clinical_record_id
+    )
+    record_result = await db.execute(record_query)
+    clinical_record = record_result.scalar_one_or_none()
+    
+    if not clinical_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinical record not found"
+        )
+    
+    # Verify appointment belongs to clinic
+    appointment_query = select(Appointment).filter(
+        Appointment.id == clinical_record.appointment_id,
+        Appointment.clinic_id == current_user.clinic_id
+    )
+    appointment_result = await db.execute(appointment_query)
+    appointment = appointment_result.scalar_one_or_none()
+    
+    if not appointment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    
+    # Check if current user is the assigned doctor or admin
+    if current_user.role != UserRole.ADMIN and appointment.doctor_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the assigned doctor can create prescriptions for this appointment"
+        )
+    
+    # Create prescription
+    prescription_data = prescription_in.model_dump()
+    prescription = Prescription(
+        clinical_record_id=clinical_record_id,
+        **prescription_data
+    )
+    db.add(prescription)
+    await db.commit()
+    await db.refresh(prescription)
+    
+    return prescription
+
+
+# ==================== Exam Requests ====================
+
+@router.get(
+    "/clinical-records/{clinical_record_id}/exam-requests",
+    response_model=List[ExamRequestResponse]
+)
+async def get_exam_requests_by_clinical_record(
+    clinical_record_id: int,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get all exam requests for a specific clinical record
+    """
+    # Verify clinical record exists and belongs to current clinic
+    record_query = select(ClinicalRecord).filter(
+        ClinicalRecord.id == clinical_record_id
+    )
+    record_result = await db.execute(record_query)
+    clinical_record = record_result.scalar_one_or_none()
+    
+    if not clinical_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinical record not found"
+        )
+    
+    # Verify appointment belongs to clinic
+    appointment_query = select(Appointment).filter(
+        Appointment.id == clinical_record.appointment_id,
+        Appointment.clinic_id == current_user.clinic_id
+    )
+    appointment_result = await db.execute(appointment_query)
+    appointment = appointment_result.scalar_one_or_none()
+    
+    if not appointment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    
+    # Get exam requests
+    exam_requests_query = select(ExamRequest).filter(
+        ExamRequest.clinical_record_id == clinical_record_id
+    ).order_by(ExamRequest.created_at.desc())
+    
+    exam_requests_result = await db.execute(exam_requests_query)
+    exam_requests = exam_requests_result.scalars().all()
+    
+    return exam_requests
+
+
+@router.post(
+    "/clinical-records/{clinical_record_id}/exam-requests",
+    response_model=ExamRequestResponse,
+    status_code=status.HTTP_201_CREATED
+)
+async def create_exam_request(
+    clinical_record_id: int,
+    exam_request_in: ExamRequestBase,
+    current_user: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a new exam request for a clinical record
+    """
+    # Verify clinical record exists and belongs to current clinic
+    record_query = select(ClinicalRecord).filter(
+        ClinicalRecord.id == clinical_record_id
+    )
+    record_result = await db.execute(record_query)
+    clinical_record = record_result.scalar_one_or_none()
+    
+    if not clinical_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinical record not found"
+        )
+    
+    # Verify appointment belongs to clinic
+    appointment_query = select(Appointment).filter(
+        Appointment.id == clinical_record.appointment_id,
+        Appointment.clinic_id == current_user.clinic_id
+    )
+    appointment_result = await db.execute(appointment_query)
+    appointment = appointment_result.scalar_one_or_none()
+    
+    if not appointment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    
+    # Check if current user is the assigned doctor or admin
+    if current_user.role != UserRole.ADMIN and appointment.doctor_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the assigned doctor can create exam requests for this appointment"
+        )
+    
+    # Create exam request
+    exam_request_data = exam_request_in.model_dump()
+    exam_request = ExamRequest(
+        clinical_record_id=clinical_record_id,
+        **exam_request_data
+    )
+    db.add(exam_request)
+    await db.commit()
+    await db.refresh(exam_request)
+    
+    return exam_request

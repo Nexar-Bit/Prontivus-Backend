@@ -1,0 +1,355 @@
+"""
+Voice Transcription Service
+Simplified transcription service using SpeechRecognition library
+Provides direct audio-to-text conversion with medical term enhancement
+"""
+
+import speech_recognition as sr
+from pydub import AudioSegment
+import io
+import tempfile
+import os
+import re
+from typing import Dict, List, Optional
+import logging
+import asyncio
+
+logger = logging.getLogger(__name__)
+
+
+class VoiceTranscriptionService:
+    """
+    Voice Transcription Service for direct audio-to-text conversion
+    Uses SpeechRecognition library with Google Speech-to-Text API
+    """
+    
+    def __init__(self):
+        self.recognizer = sr.Recognizer()
+        self.medical_terms = self._load_medical_terms()
+        # Adjust for ambient noise
+        self.recognizer.energy_threshold = 4000
+        self.recognizer.dynamic_energy_threshold = True
+    
+    def _load_medical_terms(self) -> List[str]:
+        """
+        Load Portuguese medical terminology for enhancement
+        In production, this should be loaded from database
+        """
+        return [
+            "dor abdominal", "cefaleia", "náusea", "vômito", "febre",
+            "hipertensão", "diabetes", "cardíaco", "respiratório",
+            "medicação", "dosagem", "sintomas", "diagnóstico",
+            "tratamento", "exame físico", "prescrição", "paciente",
+            "consulta", "queixa principal", "história clínica",
+            "pressão arterial", "temperatura", "frequência cardíaca",
+            "respiração", "saturação", "glicemia", "colesterol",
+            "analgésico", "anti-inflamatório", "antibiótico",
+            "alergia", "reação", "efeito colateral", "contraindicação"
+        ]
+    
+    async def transcribe_audio(
+        self, 
+        audio_file: bytes, 
+        language: str = 'pt-BR',
+        enhance_medical_terms: bool = True,
+        structure_soap: bool = False
+    ) -> Dict:
+        """
+        Transcribe audio file to text with optional medical term enhancement
+        
+        Args:
+            audio_file: Audio file bytes
+            language: Language code (default: pt-BR)
+            enhance_medical_terms: Whether to enhance medical terminology
+            structure_soap: Whether to structure into SOAP format
+        
+        Returns:
+            Dictionary with transcription results
+        """
+        try:
+            # Convert audio to WAV format if needed
+            audio_data = await self._convert_audio_format(audio_file)
+            
+            # Perform transcription
+            text = await self._transcribe_with_google(audio_data, language)
+            
+            if not text:
+                return {
+                    'success': False,
+                    'error': 'No speech detected in audio',
+                    'raw_text': '',
+                    'enhanced_text': '',
+                    'structured_notes': {}
+                }
+            
+            # Enhance medical terminology
+            enhanced_text = text
+            if enhance_medical_terms:
+                enhanced_text = self._enhance_medical_terms(text)
+            
+            # Structure into SOAP format if requested
+            structured_notes = {}
+            if structure_soap:
+                structured_notes = self._structure_into_soap(enhanced_text)
+            
+            # Calculate confidence (placeholder - Google API doesn't provide this directly)
+            confidence = self._estimate_confidence(text)
+            
+            return {
+                'success': True,
+                'raw_text': text,
+                'enhanced_text': enhanced_text,
+                'structured_notes': structured_notes,
+                'confidence': confidence,
+                'language': language,
+                'word_count': len(text.split())
+            }
+            
+        except sr.UnknownValueError:
+            logger.error("Speech Recognition could not understand audio")
+            return {
+                'success': False,
+                'error': 'Não foi possível entender o áudio. Verifique a qualidade do áudio.',
+                'raw_text': '',
+                'enhanced_text': '',
+                'structured_notes': {}
+            }
+        except sr.RequestError as e:
+            logger.error(f"Speech Recognition service error: {str(e)}")
+            return {
+                'success': False,
+                'error': f'Erro no serviço de reconhecimento de voz: {str(e)}',
+                'raw_text': '',
+                'enhanced_text': '',
+                'structured_notes': {}
+            }
+        except Exception as e:
+            logger.error(f"Transcription error: {str(e)}")
+            return {
+                'success': False,
+                'error': f'Erro na transcrição: {str(e)}',
+                'raw_text': '',
+                'enhanced_text': '',
+                'structured_notes': {}
+            }
+    
+    async def _convert_audio_format(self, audio_file: bytes) -> bytes:
+        """
+        Convert various audio formats to WAV format required by SpeechRecognition
+        
+        Args:
+            audio_file: Audio file bytes in any format
+        
+        Returns:
+            WAV format audio bytes
+        """
+        try:
+            # Try to detect format and convert
+            audio_segment = AudioSegment.from_file(io.BytesIO(audio_file))
+            
+            # Convert to WAV format (mono, 16kHz sample rate for better recognition)
+            audio_segment = audio_segment.set_channels(1)  # Mono
+            audio_segment = audio_segment.set_frame_rate(16000)  # 16kHz
+            
+            # Export to WAV
+            wav_buffer = io.BytesIO()
+            audio_segment.export(wav_buffer, format="wav")
+            wav_buffer.seek(0)
+            
+            return wav_buffer.read()
+            
+        except Exception as e:
+            # If conversion fails, assume it's already WAV or try to use as-is
+            logger.warning(f"Audio conversion warning: {str(e)}, using original format")
+            return audio_file
+    
+    async def _transcribe_with_google(self, audio_data: bytes, language: str) -> str:
+        """
+        Transcribe using Google Speech-to-Text API
+        
+        Args:
+            audio_data: WAV format audio bytes
+            language: Language code (e.g., 'pt-BR', 'en-US')
+        
+        Returns:
+            Transcribed text
+        """
+        try:
+            # Create temporary file for SpeechRecognition
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
+                temp_audio.write(audio_data)
+                temp_audio.flush()
+                temp_path = temp_audio.name
+            
+            try:
+                # Use SpeechRecognition to transcribe
+                with sr.AudioFile(temp_path) as source:
+                    # Adjust for ambient noise
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    # Record audio
+                    audio = self.recognizer.record(source)
+                    
+                    # Transcribe using Google Speech Recognition
+                    text = self.recognizer.recognize_google(audio, language=language)
+                    
+                return text
+                
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    
+        except sr.UnknownValueError:
+            raise Exception("Google Speech Recognition could not understand audio")
+        except sr.RequestError as e:
+            raise Exception(f"Could not request results from Google Speech Recognition service: {e}")
+    
+    def _enhance_medical_terms(self, text: str) -> str:
+        """
+        Enhance medical terminology in transcribed text
+        Capitalizes medical terms for better readability
+        
+        Args:
+            text: Raw transcribed text
+        
+        Returns:
+            Text with enhanced medical terms
+        """
+        enhanced_text = text
+        
+        # Sort terms by length (longest first) to avoid partial matches
+        sorted_terms = sorted(self.medical_terms, key=len, reverse=True)
+        
+        for term in sorted_terms:
+            # Case-insensitive replacement
+            pattern = re.compile(re.escape(term), re.IGNORECASE)
+            enhanced_text = pattern.sub(term.title(), enhanced_text)
+        
+        return enhanced_text
+    
+    def _structure_into_soap(self, text: str) -> Dict[str, str]:
+        """
+        Attempt to structure text into SOAP format using keyword detection
+        
+        Args:
+            text: Transcribed text
+        
+        Returns:
+            Dictionary with SOAP structure (subjective, objective, assessment, plan)
+        """
+        soap_structure = {
+            'subjective': '',
+            'objective': '', 
+            'assessment': '',
+            'plan': ''
+        }
+        
+        # Keywords for each SOAP section
+        subjective_keywords = [
+            'sente', 'dor', 'queixa', 'sintoma', 'história', 'relata',
+            'paciente diz', 'paciente refere', 'queixa principal',
+            'descreve', 'menciona', 'informa'
+        ]
+        
+        objective_keywords = [
+            'pressão', 'temperatura', 'frequência', 'exame', 'resultado',
+            'pa', 'fc', 'fr', 'sat', 'glicemia', 'peso', 'altura',
+            'ausculta', 'palpação', 'inspeção', 'percussão',
+            'exame físico', 'sinais vitais', 'achados'
+        ]
+        
+        assessment_keywords = [
+            'diagnóstico', 'hipótese', 'impressão', 'avaliação',
+            'conclusão', 'achado', 'sugere', 'compatível com',
+            'indicativo de', 'provável'
+        ]
+        
+        plan_keywords = [
+            'tratamento', 'medicação', 'prescrição', 'encaminhamento',
+            'orientação', 'conduta', 'solicitar', 'solicitação',
+            'exame', 'retorno', 'seguimento', 'recomendação'
+        ]
+        
+        # Split into sentences
+        sentences = re.split(r'[.!?]\s+', text)
+        
+        for sentence in sentences:
+            if not sentence.strip():
+                continue
+                
+            sentence_lower = sentence.lower()
+            
+            # Categorize sentence based on keywords
+            if any(keyword in sentence_lower for keyword in subjective_keywords):
+                soap_structure['subjective'] += sentence.strip() + '. '
+            elif any(keyword in sentence_lower for keyword in objective_keywords):
+                soap_structure['objective'] += sentence.strip() + '. '
+            elif any(keyword in sentence_lower for keyword in assessment_keywords):
+                soap_structure['assessment'] += sentence.strip() + '. '
+            elif any(keyword in sentence_lower for keyword in plan_keywords):
+                soap_structure['plan'] += sentence.strip() + '. '
+            else:
+                # If no keywords match, add to subjective (most common)
+                soap_structure['subjective'] += sentence.strip() + '. '
+        
+        # Clean up trailing spaces
+        for key in soap_structure:
+            soap_structure[key] = soap_structure[key].strip()
+        
+        return soap_structure
+    
+    def _estimate_confidence(self, text: str) -> float:
+        """
+        Estimate transcription confidence based on text characteristics
+        
+        Args:
+            text: Transcribed text
+        
+        Returns:
+            Confidence score (0.0 to 1.0)
+        """
+        if not text:
+            return 0.0
+        
+        # Base confidence
+        confidence = 0.7
+        
+        # Increase confidence if text contains medical terms
+        text_lower = text.lower()
+        medical_term_count = sum(1 for term in self.medical_terms if term in text_lower)
+        if medical_term_count > 0:
+            confidence += min(0.2, medical_term_count * 0.05)
+        
+        # Increase confidence if text is reasonably long
+        word_count = len(text.split())
+        if word_count > 10:
+            confidence += 0.1
+        
+        # Cap at 0.95 (never 100% confident)
+        return min(0.95, confidence)
+    
+    def get_supported_languages(self) -> List[Dict[str, str]]:
+        """
+        Get list of supported languages for transcription
+        
+        Returns:
+            List of language dictionaries with code and name
+        """
+        return [
+            {"code": "pt-BR", "name": "Portuguese (Brazil)"},
+            {"code": "en-US", "name": "English (US)"},
+            {"code": "en-GB", "name": "English (UK)"},
+            {"code": "es-ES", "name": "Spanish (Spain)"},
+            {"code": "es-MX", "name": "Spanish (Mexico)"},
+            {"code": "fr-FR", "name": "French (France)"},
+            {"code": "de-DE", "name": "German"},
+            {"code": "it-IT", "name": "Italian"},
+            {"code": "ja-JP", "name": "Japanese"},
+            {"code": "ko-KR", "name": "Korean"},
+            {"code": "zh-CN", "name": "Chinese (Simplified)"},
+        ]
+
+
+# Singleton instance
+voice_transcriber = VoiceTranscriptionService()
+

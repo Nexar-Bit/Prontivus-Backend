@@ -10,7 +10,7 @@ import os
 import json
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback
 from app.api.endpoints import icd10
 
 # Import security middleware
@@ -284,6 +284,9 @@ app.include_router(doctor_dashboard.router, prefix=API_V1_PREFIX, tags=["Doctor 
 app.include_router(payment_methods.router, prefix=API_V1_PREFIX, tags=["Payment Methods"])
 app.include_router(report_config.router, prefix=API_V1_PREFIX, tags=["Report Config"])
 app.include_router(support.router, prefix=API_V1_PREFIX, tags=["Support"])
+app.include_router(documents.router, prefix=API_V1_PREFIX, tags=["Documents"])
+app.include_router(ai_diagnosis.router, prefix=API_V1_PREFIX, tags=["AI Diagnosis"])
+app.include_router(feedback.router, prefix=API_V1_PREFIX, tags=["Feedback"])
 
 # Legacy /api routes for backward compatibility (deprecated)
 # TODO: Remove in v2.0.0
