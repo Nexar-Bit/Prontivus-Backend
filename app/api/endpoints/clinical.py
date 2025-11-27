@@ -571,6 +571,189 @@ async def create_prescription(
     return prescription
 
 
+@router.get(
+    "/prescriptions/{prescription_id}",
+    response_model=PrescriptionResponse
+)
+async def get_prescription(
+    prescription_id: int,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get a single prescription by ID
+    """
+    # Get prescription with clinical record and appointment
+    prescription_query = select(Prescription).join(
+        ClinicalRecord
+    ).join(
+        Appointment
+    ).filter(
+        Prescription.id == prescription_id,
+        Appointment.clinic_id == current_user.clinic_id
+    )
+    
+    prescription_result = await db.execute(prescription_query)
+    prescription = prescription_result.scalar_one_or_none()
+    
+    if not prescription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prescription not found"
+        )
+    
+    return prescription
+
+
+@router.put(
+    "/prescriptions/{prescription_id}",
+    response_model=PrescriptionResponse
+)
+async def update_prescription(
+    prescription_id: int,
+    prescription_in: PrescriptionUpdate,
+    current_user: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update a prescription
+    """
+    # Get prescription with clinical record and appointment
+    prescription_query = select(Prescription).join(
+        ClinicalRecord
+    ).join(
+        Appointment
+    ).filter(
+        Prescription.id == prescription_id,
+        Appointment.clinic_id == current_user.clinic_id
+    )
+    
+    prescription_result = await db.execute(prescription_query)
+    prescription = prescription_result.scalar_one_or_none()
+    
+    if not prescription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prescription not found"
+        )
+    
+    # Get appointment to check doctor assignment
+    # Get clinical record first to access appointment_id
+    clinical_record_id = prescription.clinical_record_id
+    clinical_record_query = select(ClinicalRecord).filter(
+        ClinicalRecord.id == clinical_record_id
+    )
+    clinical_record_result = await db.execute(clinical_record_query)
+    clinical_record = clinical_record_result.scalar_one_or_none()
+    
+    if not clinical_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinical record not found"
+        )
+    
+    appointment_query = select(Appointment).filter(
+        Appointment.id == clinical_record.appointment_id
+    )
+    appointment_result = await db.execute(appointment_query)
+    appointment = appointment_result.scalar_one_or_none()
+    
+    if not appointment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    
+    # Check if current user is the assigned doctor or admin
+    if current_user.role != UserRole.ADMIN and appointment.doctor_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the assigned doctor can update prescriptions for this appointment"
+        )
+    
+    # Update prescription
+    update_data = prescription_in.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(prescription, field, value)
+    
+    await db.commit()
+    await db.refresh(prescription)
+    
+    return prescription
+
+
+@router.delete(
+    "/prescriptions/{prescription_id}",
+    status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_prescription(
+    prescription_id: int,
+    current_user: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete a prescription
+    """
+    # Get prescription with clinical record and appointment
+    prescription_query = select(Prescription).join(
+        ClinicalRecord
+    ).join(
+        Appointment
+    ).filter(
+        Prescription.id == prescription_id,
+        Appointment.clinic_id == current_user.clinic_id
+    )
+    
+    prescription_result = await db.execute(prescription_query)
+    prescription = prescription_result.scalar_one_or_none()
+    
+    if not prescription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prescription not found"
+        )
+    
+    # Get appointment to check doctor assignment
+    # Get clinical record first to access appointment_id
+    clinical_record_id = prescription.clinical_record_id
+    clinical_record_query = select(ClinicalRecord).filter(
+        ClinicalRecord.id == clinical_record_id
+    )
+    clinical_record_result = await db.execute(clinical_record_query)
+    clinical_record = clinical_record_result.scalar_one_or_none()
+    
+    if not clinical_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinical record not found"
+        )
+    
+    appointment_query = select(Appointment).filter(
+        Appointment.id == clinical_record.appointment_id
+    )
+    appointment_result = await db.execute(appointment_query)
+    appointment = appointment_result.scalar_one_or_none()
+    
+    if not appointment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    
+    # Check if current user is the assigned doctor or admin
+    if current_user.role != UserRole.ADMIN and appointment.doctor_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the assigned doctor can delete prescriptions for this appointment"
+        )
+    
+    # Delete prescription
+    await db.delete(prescription)
+    await db.commit()
+    
+    return None
+
+
 # ==================== Exam Requests ====================
 
 @router.get(

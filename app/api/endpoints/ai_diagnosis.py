@@ -4,16 +4,21 @@ Provides clinical decision support including:
 - Symptom analysis and differential diagnosis
 - ICD-10 code suggestions
 - Drug interaction checking
+
+Now uses real database for ICD-10 codes and symptoms
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import List, Dict, Optional
 from pydantic import BaseModel
 import logging
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.clinical_ai import clinical_ai
 from app.core.auth import get_current_user
-from app.models import User
+from app.models import User, Symptom
+from database import get_async_session
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +42,19 @@ class DrugInteractionRequest(BaseModel):
 @router.post("/symptoms/analyze")
 async def analyze_symptoms(
     request: SymptomAnalysisRequest,
-    current_user: User = Depends(get_current_user)
+    use_ai: bool = Query(False, description="Use AI service for enhanced diagnosis"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
 ):
     """
     Analyze symptoms and suggest differential diagnoses
+    Now uses real database for symptom and ICD-10 lookups
     
     Args:
         request: SymptomAnalysisRequest with symptoms list and optional patient data
+        use_ai: Whether to use AI service for enhanced diagnosis (requires AI config)
         current_user: Current authenticated user
+        db: Database session
     
     Returns:
         Analysis result with differential diagnoses
@@ -56,9 +66,37 @@ async def analyze_symptoms(
                 detail="At least one symptom is required"
             )
         
+        # Get AI service if requested
+        ai_service = None
+        if use_ai:
+            try:
+                from app.api.endpoints.ai_usage import _get_ai_config_with_validation
+                from app.services.ai_service import create_ai_service
+                
+                ai_config, _ = await _get_ai_config_with_validation(
+                    db, 
+                    current_user.clinic_id, 
+                    check_enabled=True
+                )
+                
+                ai_service = create_ai_service(
+                    provider=ai_config.provider,
+                    api_key_encrypted=ai_config.api_key_encrypted,
+                    model=ai_config.model,
+                    base_url=ai_config.base_url,
+                    max_tokens=ai_config.max_tokens,
+                    temperature=ai_config.temperature
+                )
+            except Exception as e:
+                logger.warning(f"AI service not available, using database only: {str(e)}")
+                use_ai = False
+        
         result = await clinical_ai.analyze_symptoms(
-            request.symptoms,
-            request.patient_data
+            db=db,
+            symptoms=request.symptoms,
+            patient_data=request.patient_data,
+            use_ai=use_ai,
+            ai_service=ai_service
         )
         
         if not result.get('success'):
@@ -72,7 +110,7 @@ async def analyze_symptoms(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Symptom analysis endpoint error: {str(e)}")
+        logger.error(f"Symptom analysis endpoint error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Symptom analysis failed: {str(e)}"
@@ -82,14 +120,17 @@ async def analyze_symptoms(
 @router.post("/icd10/suggest")
 async def suggest_icd10_codes(
     request: ICD10SuggestionRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
 ):
     """
     Suggest ICD-10 codes based on clinical findings
+    Now uses real database search index
     
     Args:
         request: ICD10SuggestionRequest with clinical findings text
         current_user: Current authenticated user
+        db: Database session
     
     Returns:
         List of suggested ICD-10 codes with match scores
@@ -101,7 +142,10 @@ async def suggest_icd10_codes(
                 detail="Clinical findings text is required"
             )
         
-        codes = await clinical_ai.suggest_icd10_codes(request.clinical_findings)
+        codes = await clinical_ai.suggest_icd10_codes(
+            db=db,
+            clinical_findings=request.clinical_findings
+        )
         
         return {
             "success": True,
@@ -112,7 +156,7 @@ async def suggest_icd10_codes(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"ICD-10 suggestion endpoint error: {str(e)}")
+        logger.error(f"ICD-10 suggestion endpoint error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"ICD-10 suggestion failed: {str(e)}"
@@ -162,30 +206,60 @@ async def check_drug_interactions(
 
 @router.get("/symptoms/database")
 async def get_symptoms_database(
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
 ):
     """
     Get list of available symptoms in the database
+    Now queries real database table
     
     Args:
         current_user: Current authenticated user
+        db: Database session
     
     Returns:
         List of available symptoms
     """
     try:
-        symptoms = list(clinical_ai.symptom_database.keys())
+        # Query symptoms from database
+        result = await db.execute(
+            select(Symptom)
+            .where(Symptom.is_active == True)
+            .order_by(Symptom.name)
+        )
+        symptoms_list = result.scalars().all()
+        
+        if not symptoms_list:
+            # Fallback to hardcoded data if database is empty
+            logger.warning("Symptom database is empty, using fallback")
+            symptom_db = clinical_ai.fallback_symptom_database
+            symptoms = list(symptom_db.keys())
+        else:
+            symptoms = [symptom.name for symptom in symptoms_list]
         
         return {
             "success": True,
             "symptoms": symptoms,
-            "count": len(symptoms)
+            "count": len(symptoms),
+            "source": "database" if symptoms_list else "fallback"
         }
         
     except Exception as e:
-        logger.error(f"Get symptoms database error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get symptoms database: {str(e)}"
-        )
+        logger.error(f"Get symptoms database error: {str(e)}", exc_info=True)
+        # Fallback to hardcoded data on error
+        try:
+            symptom_db = clinical_ai.fallback_symptom_database
+            symptoms = list(symptom_db.keys())
+            return {
+                "success": True,
+                "symptoms": symptoms,
+                "count": len(symptoms),
+                "source": "fallback",
+                "warning": "Database query failed, using fallback data"
+            }
+        except:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get symptoms database: {str(e)}"
+            )
 

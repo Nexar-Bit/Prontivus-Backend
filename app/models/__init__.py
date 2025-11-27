@@ -304,6 +304,9 @@ from app.models.entitlement import Entitlement, ModuleName, LimitType
 # Import ICD-10 models
 from app.models.icd10 import ICD10Chapter, ICD10Group, ICD10Category, ICD10Subcategory, ICD10SearchIndex
 
+# Import symptom models
+from app.models.symptom import Symptom, SymptomICD10Mapping
+
 # Import voice models
 from app.models.voice import VoiceSession, VoiceCommand, MedicalTerm, VoiceConfiguration
 
@@ -379,6 +382,8 @@ __all__ = [
     "ICD10Category",
     "ICD10Subcategory",
     "ICD10SearchIndex",
+    "Symptom",
+    "SymptomICD10Mapping",
     "VoiceSession",
     "VoiceCommand",
     "MedicalTerm",
