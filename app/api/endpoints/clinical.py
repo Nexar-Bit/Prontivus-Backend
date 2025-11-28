@@ -316,49 +316,96 @@ async def get_my_clinical_history(
     Patient self-access to their clinical history (appointments + clinical records with prescriptions and exam requests).
     Maps the authenticated user to a Patient by email and clinic.
     """
-    if current_user.role != UserRole.PATIENT:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only patients can access their own clinical history")
+    try:
+        if current_user.role != UserRole.PATIENT:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only patients can access their own clinical history")
 
-    # Map user to patient by email
-    pat_q = select(Patient).where(Patient.email == current_user.email, Patient.clinic_id == current_user.clinic_id)
-    pat_res = await db.execute(pat_q)
-    patient = pat_res.scalar_one_or_none()
-    if not patient:
-        return []
+        # Map user to patient by email
+        pat_q = select(Patient).where(Patient.email == current_user.email, Patient.clinic_id == current_user.clinic_id)
+        pat_res = await db.execute(pat_q)
+        patient = pat_res.scalar_one_or_none()
+        if not patient:
+            return []
 
-    appts_q = select(Appointment, User, ClinicalRecord).join(
-        User, Appointment.doctor_id == User.id
-    ).outerjoin(
-        ClinicalRecord, Appointment.id == ClinicalRecord.appointment_id
-    ).where(
-        Appointment.patient_id == patient.id,
-        Appointment.clinic_id == current_user.clinic_id
-    ).order_by(Appointment.scheduled_datetime.desc())
+        appts_q = select(Appointment, User, ClinicalRecord).join(
+            User, Appointment.doctor_id == User.id
+        ).outerjoin(
+            ClinicalRecord, Appointment.id == ClinicalRecord.appointment_id
+        ).where(
+            Appointment.patient_id == patient.id,
+            Appointment.clinic_id == current_user.clinic_id
+        ).order_by(Appointment.scheduled_datetime.desc())
 
-    appts_res = await db.execute(appts_q)
-    appts = appts_res.all()
+        appts_res = await db.execute(appts_q)
+        appts = appts_res.all()
 
-    out: list[PatientClinicalHistoryResponse] = []
-    for appointment, doctor, clinical_record in appts:
-        record_detail = None
-        if clinical_record:
-            rq = select(ClinicalRecord).options(
-                joinedload(ClinicalRecord.prescriptions),
-                joinedload(ClinicalRecord.exam_requests),
-                joinedload(ClinicalRecord.diagnoses)
-            ).where(ClinicalRecord.id == clinical_record.id)
-            rr = await db.execute(rq)
-            record_detail = rr.scalar_one()
+        out: list[PatientClinicalHistoryResponse] = []
+        for appointment, doctor, clinical_record in appts:
+            record_detail = None
+            if clinical_record:
+                try:
+                    rq = select(ClinicalRecord).options(
+                        joinedload(ClinicalRecord.prescriptions),
+                        joinedload(ClinicalRecord.exam_requests),
+                        joinedload(ClinicalRecord.diagnoses)
+                    ).where(ClinicalRecord.id == clinical_record.id)
+                    rr = await db.execute(rq)
+                    record_detail = rr.scalar_one_or_none()
+                except Exception as e:
+                    # Log error but continue with other records
+                    import logging
+                    logging.error(f"Error loading clinical record {clinical_record.id}: {str(e)}")
+                    record_detail = None
 
-        out.append(PatientClinicalHistoryResponse(
-            appointment_id=appointment.id,
-            appointment_date=appointment.scheduled_datetime,
-            doctor_name=f"{doctor.first_name} {doctor.last_name}",
-            appointment_type=appointment.appointment_type,
-            status=appointment.status,
-            clinical_record=ClinicalRecordDetailResponse.model_validate(record_detail) if record_detail else None
-        ))
-    return out
+            try:
+                clinical_record_response = None
+                if record_detail:
+                    try:
+                        clinical_record_response = ClinicalRecordDetailResponse.model_validate(record_detail)
+                    except Exception as e:
+                        # If validation fails, try to create a basic response without relationships
+                        import logging
+                        logging.error(f"Error validating clinical record {record_detail.id}: {str(e)}")
+                        # Create a basic response with empty relationships
+                        clinical_record_response = ClinicalRecordDetailResponse(
+                            id=record_detail.id,
+                            appointment_id=record_detail.appointment_id,
+                            subjective=record_detail.subjective,
+                            objective=record_detail.objective,
+                            assessment=record_detail.assessment,
+                            plan=record_detail.plan,
+                            plan_soap=record_detail.plan_soap,
+                            created_at=record_detail.created_at,
+                            updated_at=record_detail.updated_at,
+                            prescriptions=[],
+                            exam_requests=[],
+                            diagnoses=[]
+                        )
+
+                out.append(PatientClinicalHistoryResponse(
+                    appointment_id=appointment.id,
+                    appointment_date=appointment.scheduled_datetime,
+                    doctor_name=f"{doctor.first_name} {doctor.last_name}",
+                    appointment_type=appointment.appointment_type,
+                    status=appointment.status,
+                    clinical_record=clinical_record_response
+                ))
+            except Exception as e:
+                # Log error but continue with other appointments
+                import logging
+                logging.error(f"Error processing appointment {appointment.id}: {str(e)}")
+                continue
+
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logging.error(f"Error in get_my_clinical_history: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading clinical history: {str(e)}"
+        )
 
 
 @router.get(
