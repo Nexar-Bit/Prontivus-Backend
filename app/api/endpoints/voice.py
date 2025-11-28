@@ -20,7 +20,15 @@ from app.schemas.voice import (
     MedicalTermResponse, VoiceConfigurationResponse, VoiceProcessingResult
 )
 from app.services.voice_processing import voice_service
-from app.services.voice_transcription import voice_transcriber
+try:
+    from app.services.voice_transcription import voice_transcriber
+    VOICE_TRANSCRIPTION_AVAILABLE = True
+except ImportError as e:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Voice transcription not available: {e}")
+    VOICE_TRANSCRIPTION_AVAILABLE = False
+    voice_transcriber = None
 
 logger = logging.getLogger(__name__)
 
@@ -510,6 +518,12 @@ async def transcribe_audio(
             )
         
         # Transcribe
+        if not VOICE_TRANSCRIPTION_AVAILABLE or voice_transcriber is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Voice transcription service is not available. SpeechRecognition library is not compatible with this Python version."
+            )
+        
         result = await voice_transcriber.transcribe_audio(
             audio_data,
             language=language,
@@ -549,6 +563,12 @@ async def get_supported_languages(
         List of supported languages with codes and names
     """
     try:
+        if not VOICE_TRANSCRIPTION_AVAILABLE or voice_transcriber is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Voice transcription service is not available. SpeechRecognition library is not compatible with this Python version."
+            )
+        
         languages = voice_transcriber.get_supported_languages()
         return {
             "languages": languages,

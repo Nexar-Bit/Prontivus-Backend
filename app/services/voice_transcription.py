@@ -4,8 +4,6 @@ Simplified transcription service using SpeechRecognition library
 Provides direct audio-to-text conversion with medical term enhancement
 """
 
-import speech_recognition as sr
-from pydub import AudioSegment
 import io
 import tempfile
 import os
@@ -13,6 +11,17 @@ import re
 from typing import Dict, List, Optional
 import logging
 import asyncio
+
+# Handle Python 3.13 compatibility - aifc module was removed
+try:
+    import speech_recognition as sr
+    from pydub import AudioSegment
+    SPEECH_RECOGNITION_AVAILABLE = True
+except ImportError as e:
+    # If speech_recognition fails to import (e.g., due to missing aifc in Python 3.13)
+    # Create a mock recognizer that will fail gracefully
+    SPEECH_RECOGNITION_AVAILABLE = False
+    logging.warning(f"SpeechRecognition not available: {e}. Voice transcription will be disabled.")
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +33,15 @@ class VoiceTranscriptionService:
     """
     
     def __init__(self):
-        self.recognizer = sr.Recognizer()
+        if not SPEECH_RECOGNITION_AVAILABLE:
+            self.recognizer = None
+            logger.warning("SpeechRecognition not available. Voice transcription disabled.")
+        else:
+            self.recognizer = sr.Recognizer()
+            # Adjust for ambient noise
+            self.recognizer.energy_threshold = 4000
+            self.recognizer.dynamic_energy_threshold = True
         self.medical_terms = self._load_medical_terms()
-        # Adjust for ambient noise
-        self.recognizer.energy_threshold = 4000
-        self.recognizer.dynamic_energy_threshold = True
     
     def _load_medical_terms(self) -> List[str]:
         """
@@ -66,6 +79,15 @@ class VoiceTranscriptionService:
         Returns:
             Dictionary with transcription results
         """
+        if not SPEECH_RECOGNITION_AVAILABLE or self.recognizer is None:
+            return {
+                'success': False,
+                'error': 'Voice transcription is not available. SpeechRecognition library is not compatible with this Python version.',
+                'raw_text': '',
+                'enhanced_text': '',
+                'structured_notes': {}
+            }
+        
         try:
             # Convert audio to WAV format if needed
             audio_data = await self._convert_audio_format(audio_file)
@@ -105,25 +127,28 @@ class VoiceTranscriptionService:
                 'word_count': len(text.split())
             }
             
-        except sr.UnknownValueError:
-            logger.error("Speech Recognition could not understand audio")
-            return {
-                'success': False,
-                'error': 'Não foi possível entender o áudio. Verifique a qualidade do áudio.',
-                'raw_text': '',
-                'enhanced_text': '',
-                'structured_notes': {}
-            }
-        except sr.RequestError as e:
-            logger.error(f"Speech Recognition service error: {str(e)}")
-            return {
-                'success': False,
-                'error': f'Erro no serviço de reconhecimento de voz: {str(e)}',
-                'raw_text': '',
-                'enhanced_text': '',
-                'structured_notes': {}
-            }
         except Exception as e:
+            error_type = type(e).__name__
+            if SPEECH_RECOGNITION_AVAILABLE:
+                if error_type == 'UnknownValueError':
+                    logger.error("Speech Recognition could not understand audio")
+                    return {
+                        'success': False,
+                        'error': 'Não foi possível entender o áudio. Verifique a qualidade do áudio.',
+                        'raw_text': '',
+                        'enhanced_text': '',
+                        'structured_notes': {}
+                    }
+                elif error_type == 'RequestError':
+                    logger.error(f"Speech Recognition service error: {str(e)}")
+                    return {
+                        'success': False,
+                        'error': f'Erro no serviço de reconhecimento de voz: {str(e)}',
+                        'raw_text': '',
+                        'enhanced_text': '',
+                        'structured_notes': {}
+                    }
+            
             logger.error(f"Transcription error: {str(e)}")
             return {
                 'success': False,
@@ -143,6 +168,9 @@ class VoiceTranscriptionService:
         Returns:
             WAV format audio bytes
         """
+        if not SPEECH_RECOGNITION_AVAILABLE:
+            return audio_file
+        
         try:
             # Try to detect format and convert
             audio_segment = AudioSegment.from_file(io.BytesIO(audio_file))
@@ -174,6 +202,9 @@ class VoiceTranscriptionService:
         Returns:
             Transcribed text
         """
+        if not SPEECH_RECOGNITION_AVAILABLE or self.recognizer is None:
+            raise Exception("Speech Recognition is not available")
+        
         try:
             # Create temporary file for SpeechRecognition
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
