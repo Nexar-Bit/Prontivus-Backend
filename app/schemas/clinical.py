@@ -85,6 +85,7 @@ class ExamRequestCreate(ExamRequestBase):
 
 class ExamRequestFromAppointmentCreate(ExamRequestBase):
     appointment_id: int
+    exam_catalog_id: Optional[int] = None
 
 
 class ExamRequestUpdate(BaseModel):
@@ -118,6 +119,36 @@ class ExamResultUpdate(BaseModel):
     completed: bool = True
     completed_date: Optional[datetime.datetime] = None
     exam_catalog_id: Optional[int] = None
+
+
+# ==================== Exam Catalog Schemas ====================
+
+class ExamCatalogBase(BaseModel):
+    code: Optional[str] = Field(None, max_length=50, description="Exam code (e.g., HEMO-001)")
+    name: str = Field(..., max_length=200, description="Exam name (e.g., Hemograma)")
+    category: Optional[str] = Field(None, max_length=100, description="Category (e.g., Laboratório, Imagem)")
+    description: Optional[str] = Field(None, description="Detailed description")
+    preparation: Optional[str] = Field(None, description="Patient preparation instructions")
+    price: Optional[float] = Field(None, ge=0, description="Exam price")
+    is_active: bool = Field(default=True, description="Whether the exam is active")
+
+
+class ExamCatalogCreate(ExamCatalogBase):
+    pass
+
+
+class ExamCatalogUpdate(ExamCatalogBase):
+    pass
+
+
+class ExamCatalogResponse(ExamCatalogBase):
+    id: int
+    clinic_id: int
+    created_at: datetime.datetime
+    updated_at: Optional[datetime.datetime]
+    
+    class Config:
+        from_attributes = True
 
 
 # ==================== Complete Clinical Record with Relations ====================
