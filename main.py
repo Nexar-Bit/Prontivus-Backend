@@ -320,6 +320,7 @@ app.include_router(doctor_dashboard.router, prefix="/api", tags=["Doctor Dashboa
 app.include_router(payment_methods.router, prefix="/api", tags=["Payment Methods (Legacy)"], deprecated=True)
 app.include_router(report_config.router, prefix="/api", tags=["Report Config (Legacy)"], deprecated=True)
 
+
 @app.get("/")
 async def root():
     """Health check endpoint"""
