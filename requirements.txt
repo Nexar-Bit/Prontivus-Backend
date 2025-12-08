@@ -41,4 +41,7 @@ openai[azure]>=1.12.0
 # Voice Transcription Libraries
 SpeechRecognition==3.10.0
 pydub==0.25.1
+# AWS Comprehend Medical
+boto3>=1.34.0
+botocore>=1.34.0
 

@@ -418,6 +418,11 @@ async def book_patient_appointment(
     
     # Create appointment
     appointment_data = appointment_in.model_dump()
+    # Remove payment-related fields that don't belong in Appointment model
+    consultation_price = appointment_data.pop("consultation_price", None)
+    payment_method = appointment_data.pop("payment_method", None)
+    create_invoice_flag = appointment_data.pop("create_invoice", False)
+    
     # If no explicit appointment_type was provided, default to doctor's consultation_room (if any)
     if not appointment_data.get("appointment_type") and getattr(doctor, "consultation_room", None):
         appointment_data["appointment_type"] = doctor.consultation_room
@@ -426,6 +431,64 @@ async def book_patient_appointment(
     db.add(db_appointment)
     await db.commit()
     await db.refresh(db_appointment)
+    
+    # Optionally create invoice if requested and price is provided
+    if create_invoice_flag and (consultation_price or doctor.consultation_fee):
+        from decimal import Decimal
+        from app.models.financial import Invoice, InvoiceLine, InvoiceStatus, ServiceItem, ServiceCategory
+        from datetime import datetime, timedelta, timezone
+        
+        # Determine the price to use
+        price_to_use = Decimal(str(consultation_price)) if consultation_price else (doctor.consultation_fee or Decimal('0'))
+        
+        if price_to_use:
+            # Try to find or create a consultation service item
+            service_item_query = select(ServiceItem).filter(
+                and_(
+                    ServiceItem.clinic_id == current_user.clinic_id,
+                    ServiceItem.category == ServiceCategory.CONSULTATION,
+                    ServiceItem.is_active == True
+                )
+            ).limit(1)
+            service_item_result = await db.execute(service_item_query)
+            service_item = service_item_result.scalar_one_or_none()
+            
+            # Create invoice
+            db_invoice = Invoice(
+                clinic_id=current_user.clinic_id,
+                patient_id=patient.id,
+                appointment_id=db_appointment.id,
+                due_date=datetime.now(timezone.utc) + timedelta(days=30),  # Due in 30 days
+                status=InvoiceStatus.ISSUED,
+                total_amount=price_to_use
+            )
+            db.add(db_invoice)
+            await db.flush()
+            
+            # Create invoice line
+            invoice_line = InvoiceLine(
+                invoice_id=db_invoice.id,
+                service_item_id=service_item.id if service_item else None,
+                quantity=Decimal('1.00'),
+                unit_price=price_to_use,
+                line_total=price_to_use,
+                description=f"Consulta com {doctor.full_name}"
+            )
+            db.add(invoice_line)
+            
+            # If payment method is provided, create payment record
+            if payment_method:
+                from app.models.financial import Payment, PaymentStatus
+                payment = Payment(
+                    invoice_id=db_invoice.id,
+                    amount=price_to_use,
+                    method=payment_method,
+                    status=PaymentStatus.PENDING,  # Will be marked as completed when actually paid
+                    created_by=current_user.id
+                )
+                db.add(payment)
+            
+            await db.commit()
     
     # Build response with patient and doctor names
     response = AppointmentResponse.model_validate(db_appointment)
@@ -754,6 +817,11 @@ async def create_appointment(
     
     # Create appointment
     appointment_data = appointment_in.model_dump()
+    # Remove payment-related fields that don't belong in Appointment model
+    consultation_price = appointment_data.pop("consultation_price", None)
+    payment_method = appointment_data.pop("payment_method", None)
+    create_invoice_flag = appointment_data.pop("create_invoice", False)
+    
     # If no explicit appointment_type was provided, default to doctor's consultation_room (if any)
     if not appointment_data.get("appointment_type") and getattr(doctor, "consultation_room", None):
         appointment_data["appointment_type"] = doctor.consultation_room
@@ -762,6 +830,66 @@ async def create_appointment(
     db.add(db_appointment)
     await db.commit()
     await db.refresh(db_appointment)
+    
+    # Optionally create invoice if requested and price is provided
+    if create_invoice_flag and consultation_price:
+        from decimal import Decimal
+        from app.models.financial import Invoice, InvoiceLine, InvoiceStatus, ServiceItem, ServiceCategory
+        from datetime import datetime, timedelta, timezone
+        
+        # Determine the price to use
+        price_to_use = Decimal(str(consultation_price))
+        if not price_to_use and doctor.consultation_fee:
+            price_to_use = doctor.consultation_fee
+        
+        if price_to_use:
+            # Try to find or create a consultation service item
+            service_item_query = select(ServiceItem).filter(
+                and_(
+                    ServiceItem.clinic_id == current_user.clinic_id,
+                    ServiceItem.category == ServiceCategory.CONSULTATION,
+                    ServiceItem.is_active == True
+                )
+            ).limit(1)
+            service_item_result = await db.execute(service_item_query)
+            service_item = service_item_result.scalar_one_or_none()
+            
+            # Create invoice
+            db_invoice = Invoice(
+                clinic_id=current_user.clinic_id,
+                patient_id=patient.id,
+                appointment_id=db_appointment.id,
+                due_date=datetime.now(timezone.utc) + timedelta(days=30),  # Due in 30 days
+                status=InvoiceStatus.ISSUED,
+                total_amount=price_to_use
+            )
+            db.add(db_invoice)
+            await db.flush()
+            
+            # Create invoice line
+            invoice_line = InvoiceLine(
+                invoice_id=db_invoice.id,
+                service_item_id=service_item.id if service_item else None,
+                quantity=Decimal('1.00'),
+                unit_price=price_to_use,
+                line_total=price_to_use,
+                description=f"Consulta com {doctor.full_name}"
+            )
+            db.add(invoice_line)
+            
+            # If payment method is provided, create payment record
+            if payment_method:
+                from app.models.financial import Payment, PaymentStatus
+                payment = Payment(
+                    invoice_id=db_invoice.id,
+                    amount=price_to_use,
+                    method=payment_method,
+                    status=PaymentStatus.PENDING,  # Will be marked as completed when actually paid
+                    created_by=current_user.id
+                )
+                db.add(payment)
+            
+            await db.commit()
     
     # Add patient and doctor names to response
     response = AppointmentResponse.model_validate(db_appointment)

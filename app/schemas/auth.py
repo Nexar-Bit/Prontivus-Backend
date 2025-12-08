@@ -160,6 +160,7 @@ class UserResponse(BaseModel):
     clinic_id: int
     clinic: Optional[ClinicInfo] = None
     consultation_room: Optional[str] = None
+    consultation_fee: Optional[float] = None
     
     class Config:
         from_attributes = True

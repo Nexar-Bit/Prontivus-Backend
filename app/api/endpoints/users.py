@@ -52,6 +52,7 @@ class UserListResponse(BaseModel):
     is_active: bool = True
     is_verified: bool = False
     consultation_room: Optional[str] = None
+    consultation_fee: Optional[float] = None
     
     class Config:
         from_attributes = True
@@ -145,6 +146,7 @@ class UserCreateRequest(BaseModel):
     role: UserRole
     clinic_id: Optional[int] = None  # Allow SuperAdmin to specify clinic_id
     consultation_room: Optional[str] = None  # Default room for doctors (optional)
+    consultation_fee: Optional[float] = None  # Default consultation fee for doctors (optional)
 
 
 class UserUpdateRequest(BaseModel):
@@ -156,6 +158,7 @@ class UserUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
     is_verified: Optional[bool] = None
     consultation_room: Optional[str] = None  # Allow updating default room
+    consultation_fee: Optional[float] = None  # Allow updating consultation fee
 
 
 @router.post("", response_model=UserListResponse, status_code=status.HTTP_201_CREATED)
@@ -176,6 +179,7 @@ async def create_user(
     # SuperAdmin can create users for any clinic by providing clinic_id
     target_clinic_id = payload.clinic_id if payload.clinic_id else current_user.clinic_id
     
+    from decimal import Decimal
     new_user = User(
         username=payload.username,
         email=payload.email,
@@ -187,6 +191,7 @@ async def create_user(
         is_active=True,
         is_verified=False,
         consultation_room=(payload.consultation_room or None),
+        consultation_fee=Decimal(str(payload.consultation_fee)) if payload.consultation_fee is not None else None,
     )
     db.add(new_user)
     await db.commit()
@@ -251,6 +256,9 @@ async def update_user(
     if payload.consultation_room is not None:
         # Normalize empty strings to None
         user.consultation_room = payload.consultation_room.strip() or None
+    if payload.consultation_fee is not None:
+        from decimal import Decimal
+        user.consultation_fee = Decimal(str(payload.consultation_fee))
 
     await db.commit()
     await db.refresh(user)

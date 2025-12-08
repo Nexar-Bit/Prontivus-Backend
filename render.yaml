@@ -24,8 +24,8 @@ services:
       - key: BACKEND_CORS_ORIGINS
         # Frontend URL(s) - comma-separated
         # IMPORTANT: This should be set in Render dashboard Environment Variables
-        # For production: https://prontivus-f-pplm.vercel.app
-        value: "https://prontivus-f-pplm.vercel.app"
+        # For production: https://prontivus-frontend-p2rr.vercel.app
+        value: "https://prontivus-frontend-p2rr.vercel.app"
       - key: PYTHON_VERSION
         value: 3.12.0
 

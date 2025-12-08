@@ -3,8 +3,10 @@ Appointment Pydantic schemas for request/response validation
 """
 import datetime
 from typing import Optional
+from decimal import Decimal
 from pydantic import BaseModel, Field
 from app.models import AppointmentStatus
+from app.models.financial import PaymentMethod
 
 
 class AppointmentBase(BaseModel):
@@ -18,6 +20,9 @@ class AppointmentCreate(AppointmentBase):
     patient_id: int
     doctor_id: int
     clinic_id: int
+    consultation_price: Optional[Decimal] = Field(None, description="Consultation price (if different from doctor's default)")
+    payment_method: Optional[PaymentMethod] = Field(None, description="Preferred payment method for this appointment")
+    create_invoice: Optional[bool] = Field(False, description="Whether to auto-create invoice for this appointment")
 
 
 class AppointmentUpdate(BaseModel):

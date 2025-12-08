@@ -5,7 +5,7 @@ SQLAlchemy ORM models for the healthcare management system
 
 from sqlalchemy import (
     Column, Integer, String, DateTime, Boolean, Date, Text, 
-    ForeignKey, Enum as SQLEnum, JSON
+    ForeignKey, Enum as SQLEnum, JSON, Numeric
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -127,6 +127,7 @@ class User(BaseModel):
     role_id = Column(Integer, ForeignKey("user_roles.id"), nullable=True, index=True)  # New role reference
     permissions = Column(JSON, nullable=True)  # Granular permissions JSON field
     consultation_room = Column(String(100), nullable=True)  # Default physical room/location for doctors
+    consultation_fee = Column(Numeric(10, 2), nullable=True)  # Default consultation fee for doctors
     
     # Status
     is_active = Column(Boolean, default=True, nullable=False)
