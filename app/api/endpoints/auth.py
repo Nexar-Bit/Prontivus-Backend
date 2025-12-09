@@ -142,13 +142,14 @@ async def login(
         user_agent = request.headers.get("user-agent")
         
         # Send alert in background (don't await)
+        # Don't pass db session - let it create its own to avoid session state issues
         # Use asyncio.create_task to run in background
         import asyncio
         asyncio.create_task(send_login_alert(
             user_id=user.id,
             login_ip=client_ip,
             user_agent=user_agent,
-            db=db
+            db=None  # Let it create its own session
         ))
     except Exception as e:
         # Don't fail login if alert fails

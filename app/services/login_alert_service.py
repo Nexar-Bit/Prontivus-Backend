@@ -65,29 +65,31 @@ async def send_login_alert(
     from app.models import User
     from app.services.notification_dispatcher import send_system_update
     
+    # Get user information - create new session if not provided
+    # This is important when called from background tasks
+    if not db:
+        from database import AsyncSessionLocal
+        db = AsyncSessionLocal()
+        should_close = True
+    else:
+        should_close = False
+    
     # Check if login alerts are enabled
-    if db:
+    try:
         enabled = await should_send_login_alert(user_id, db)
         if not enabled:
             logger.info(f"Login alerts disabled for user {user_id}, skipping alert")
+            if should_close:
+                await db.close()
             return True
-    else:
-        # If no db provided, we can't check settings, so default to enabled
+    except Exception as e:
+        logger.warning(f"Error checking login alert settings: {e}, defaulting to enabled")
         enabled = True
     
     if not enabled:
+        if should_close:
+            await db.close()
         return True
-    
-    # Get user information
-    if not db:
-        from database import get_async_session
-        async for session in get_async_session():
-            db = session
-            break
-    
-    if not db:
-        logger.error("Database session required for sending login alerts")
-        return False
     
     try:
         result = await db.execute(
@@ -136,9 +138,22 @@ async def send_login_alert(
         )
         
         logger.info(f"Login alert sent to user {user_id}")
+        
+        # Close session if we created it
+        if should_close:
+            await db.close()
+        
         return True
         
     except Exception as e:
         logger.error(f"Error sending login alert: {str(e)}")
+        
+        # Close session if we created it (even on error)
+        if should_close and db:
+            try:
+                await db.close()
+            except:
+                pass
+        
         return False
 
