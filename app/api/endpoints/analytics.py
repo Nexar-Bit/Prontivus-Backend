@@ -43,8 +43,16 @@ async def get_dashboard_stats(
     """
     Get dashboard statistics for the current user's clinic.
     Returns metrics for patients, appointments, revenue, and other key indicators.
+    Uses caching to improve performance.
     """
     try:
+        # Check cache first (5 minute TTL)
+        cache_key = f"dashboard_stats:clinic_{current_user.clinic_id}"
+        cached_result = analytics_cache.get(cache_key)
+        if cached_result:
+            logger.info(f"Returning cached dashboard stats for clinic {current_user.clinic_id}")
+            return cached_result
+        
         logger.info(f"Fetching dashboard stats for clinic_id: {current_user.clinic_id}, user: {current_user.email}")
         now = datetime.now(timezone.utc)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -204,6 +212,11 @@ async def get_dashboard_stats(
             },
         }
         logger.info(f"Dashboard stats result for clinic {current_user.clinic_id}: patients={result['patients']['value']}, appointments={result['appointments']['value']}, satisfaction={result['satisfaction']['value']}")
+        
+        # Cache the result for 5 minutes (300 seconds) to improve performance
+        cache_key = f"dashboard_stats:clinic_{current_user.clinic_id}"
+        analytics_cache.set(cache_key, result, ttl_seconds=300)
+        
         return result
     except SQLAlchemyError as e:
         logger.error(f"Database error in dashboard stats: {str(e)}", exc_info=True)
