@@ -74,10 +74,18 @@ class EmailService:
             msg.attach(html_part)
             
             # Send email
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.smtp_user, self.smtp_password)
-                server.send_message(msg)
+            # Port 465 uses SSL, port 587 uses TLS
+            if self.smtp_port == 465:
+                # Use SSL for port 465
+                with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port) as server:
+                    server.login(self.smtp_user, self.smtp_password)
+                    server.send_message(msg)
+            else:
+                # Use TLS for port 587 and others
+                with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+                    server.starttls()
+                    server.login(self.smtp_user, self.smtp_password)
+                    server.send_message(msg)
             
             logger.info(f"Email sent successfully to {to_email}: {subject}")
             return True

@@ -6,6 +6,7 @@ from datetime import date, timedelta, datetime, timezone
 from typing import List, Optional
 import secrets
 import string
+import os
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -713,6 +714,7 @@ async def create_clinic(
         counter += 1
     
     # Generate email from clinic email or use default pattern
+    # Use clinic email if available, otherwise generate from clinic name
     admin_email = clinic_data.email if clinic_data.email else f"admin@{clinic_name_slug}.com"
     # Ensure email uniqueness
     email_counter = 1
@@ -731,8 +733,8 @@ async def create_clinic(
             admin_email = f"admin{email_counter}@{clinic_name_slug}.com"
         email_counter += 1
     
-    # Generate secure random password for the clinic admin user
-    default_password = generate_secure_password()
+    # Generate secure random password for the clinic admin user (16 characters for better security)
+    default_password = generate_secure_password(length=16)
     
     # Create AdminClinica user for the new clinic
     admin_user = User(
@@ -754,46 +756,108 @@ async def create_clinic(
     await db.refresh(clinic)
     await db.refresh(admin_user)
     
-    # Send credentials email to clinic email if available
-    if clinic.email:
+    # Send credentials email to clinic email (or admin email as fallback)
+    recipient_email = clinic.email or admin_email
+    if recipient_email:
         try:
-            login_url = "/portal/login"
-            # Basic HTML email with credentials
+            # Get the frontend URL from environment or use default
+            frontend_url = os.getenv("FRONTEND_URL", "https://prontivus-frontend-p2rr.vercel.app")
+            login_url = f"{frontend_url}/portal/login"
+            
+            # Professional HTML email with credentials
             html_body = f"""
-            <p>Olá,</p>
-            <p>Sua clínica <strong>{clinic.name}</strong> foi cadastrada com sucesso no Prontivus.</p>
-            <p>Segue abaixo o usuário administrador da clínica:</p>
-            <ul>
-                <li><strong>Usuário:</strong> {username}</li>
-                <li><strong>E-mail:</strong> {admin_email}</li>
-                <li><strong>Senha provisória:</strong> {default_password}</li>
-            </ul>
-            <p>Por segurança, recomendamos que a senha seja alterada no primeiro acesso.</p>
-            <p>Você pode acessar o sistema pelo link: <a href="{login_url}">{login_url}</a></p>
-            <p>Atenciosamente,<br/>Equipe Prontivus</p>
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ background-color: #0F4C75; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
+                    .content {{ background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; }}
+                    .credentials {{ background-color: white; padding: 20px; margin: 20px 0; border-left: 4px solid #0F4C75; }}
+                    .credential-item {{ margin: 10px 0; padding: 8px; background-color: #f5f5f5; border-radius: 3px; }}
+                    .credential-label {{ font-weight: bold; color: #0F4C75; }}
+                    .password {{ font-family: monospace; font-size: 14px; color: #d32f2f; background-color: #fff3cd; padding: 5px 10px; border-radius: 3px; }}
+                    .button {{ display: inline-block; padding: 12px 24px; background-color: #0F4C75; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+                    .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+                    .warning {{ background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Bem-vindo ao Prontivus</h1>
+                    </div>
+                    <div class="content">
+                        <p>Olá,</p>
+                        <p>Sua clínica <strong>{clinic.name}</strong> foi cadastrada com sucesso no sistema Prontivus.</p>
+                        
+                        <p>Segue abaixo as credenciais do usuário administrador da clínica:</p>
+                        
+                        <div class="credentials">
+                            <div class="credential-item">
+                                <span class="credential-label">Usuário:</span> {username}
+                            </div>
+                            <div class="credential-item">
+                                <span class="credential-label">E-mail:</span> {admin_email}
+                            </div>
+                            <div class="credential-item">
+                                <span class="credential-label">Senha provisória:</span>
+                                <div class="password">{default_password}</div>
+                            </div>
+                        </div>
+                        
+                        <div class="warning">
+                            <strong>⚠️ Importante:</strong> Por segurança, recomendamos fortemente que você altere esta senha no primeiro acesso ao sistema.
+                        </div>
+                        
+                        <p style="text-align: center;">
+                            <a href="{login_url}" class="button">Acessar o Sistema</a>
+                        </p>
+                        
+                        <p>Ou copie e cole o seguinte link no seu navegador:</p>
+                        <p style="word-break: break-all; color: #0F4C75;">{login_url}</p>
+                    </div>
+                    <div class="footer">
+                        <p>Atenciosamente,<br/><strong>Equipe Prontivus</strong></p>
+                        <p style="margin-top: 20px; font-size: 11px; color: #999;">
+                            Este é um e-mail automático. Por favor, não responda a esta mensagem.
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
             """
             text_body = (
+                f"Bem-vindo ao Prontivus\n\n"
                 f"Olá,\n\n"
-                f"Sua clínica {clinic.name} foi cadastrada com sucesso no Prontivus.\n\n"
-                f"Usuário administrador:\n"
-                f"- Usuário: {username}\n"
-                f"- E-mail: {admin_email}\n"
-                f"- Senha provisória: {default_password}\n\n"
-                f"Por segurança, recomendamos que a senha seja alterada no primeiro acesso.\n\n"
-                f"Acesse: {login_url}\n\n"
-                f"Atenciosamente,\nEquipe Prontivus\n"
+                f"Sua clínica {clinic.name} foi cadastrada com sucesso no sistema Prontivus.\n\n"
+                f"CREDENCIAIS DO ADMINISTRADOR:\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Usuário: {username}\n"
+                f"E-mail: {admin_email}\n"
+                f"Senha provisória: {default_password}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"⚠️ IMPORTANTE: Por segurança, recomendamos fortemente que você altere esta senha no primeiro acesso ao sistema.\n\n"
+                f"Acesse o sistema em: {login_url}\n\n"
+                f"Atenciosamente,\nEquipe Prontivus\n\n"
+                f"---\n"
+                f"Este é um e-mail automático. Por favor, não responda a esta mensagem."
             )
-            await email_service.send_email(
-                to_email=clinic.email,
-                subject="Prontivus - Acesso do Administrador da Clínica",
+            email_sent = await email_service.send_email(
+                to_email=recipient_email,
+                subject="Prontivus - Credenciais de Acesso do Administrador",
                 html_body=html_body,
                 text_body=text_body,
             )
-        except Exception:
-            # Don't fail clinic creation if email sending fails
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.exception("Failed to send clinic admin credentials email")
+            if email_sent:
+                logger.info(f"Clinic admin credentials email sent successfully to {recipient_email}")
+            else:
+                logger.warning(f"Failed to send clinic admin credentials email to {recipient_email}")
+        except Exception as e:
+            # Don't fail clinic creation if email sending fails, but log the error
+            logger.exception(f"Failed to send clinic admin credentials email to {recipient_email}: {str(e)}")
     
     # Log the creation
     try:
@@ -843,11 +907,10 @@ async def create_clinic(
         "active_modules": clinic.active_modules or [],
         "created_at": to_date(getattr(clinic, "created_at", None)) or date.today(),
         "updated_at": to_date(getattr(clinic, "updated_at", None)),
-        # Add admin user info to response
+        # Add admin user info to response (password NOT included for security)
         "admin_user": {
             "username": username,
             "email": admin_email,
-            "password": default_password,  # Include password so SuperAdmin can share it
             "role": "AdminClinica"
         }
     }
