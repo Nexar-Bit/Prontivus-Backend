@@ -1288,7 +1288,7 @@ async def delete_clinic(
         except Exception as e:
             error_msg = str(e).lower()
             logger.warning(f"Error deleting exam_requests: {error_msg}")
-            # If table doesn't exist or column doesn't exist, just skip
+            # If table doesn't exist or column doesn't exist, just skip (don't exit function)
             if ("does not exist" in error_msg or "undefinedtable" in error_msg or 
                 "table" in error_msg and "doesn't exist" in error_msg or
                 "unknown table" in error_msg or "unknown column" in error_msg):
@@ -1298,10 +1298,11 @@ async def delete_clinic(
                     await db.execute(text("SELECT 1"))
                 except Exception as rollback_error:
                     logger.warning(f"Error during rollback/restart: {rollback_error}")
-                return  # Skip this deletion
-            # For other errors, re-raise
-            await db.rollback()
-            raise
+                # Continue to next deletion instead of returning
+            else:
+                # For other errors, re-raise
+                await db.rollback()
+                raise
         
         # PHASE 2: Delete critical tables (these must succeed)
         # After all optional tables are handled, delete critical tables
