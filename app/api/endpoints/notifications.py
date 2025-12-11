@@ -6,6 +6,8 @@ and provides actions to resolve/acknowledge them.
 
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
+import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, and_, desc, func, or_
@@ -17,6 +19,7 @@ from app.models import User, UserRole, Appointment, Patient
 from app.models.stock import StockAlert
 from app.models.message import MessageThread, Message, MessageStatus
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
@@ -30,93 +33,41 @@ async def list_notifications(
     Return synthesized notifications for the current user.
     - Staff (admin/secretary/doctor): unresolved stock alerts, recent appointments, and unread messages
     - Patient: upcoming appointments and unread messages
+    Optimized to run queries in parallel for better performance.
     """
     notifications: list[dict] = []
-
     now = datetime.now(timezone.utc)
-
-    # Get unread message count for all users
-    unread_message_count = 0
-    patient = None
-    try:
-        # Check if user is a patient
-        patient_query = select(Patient).filter(
-            and_(
-                Patient.email == current_user.email,
-                Patient.clinic_id == current_user.clinic_id
-            )
-        )
-        patient_result = await db.execute(patient_query)
-        patient = patient_result.scalar_one_or_none()
-        
-        if patient:
-            # Patient: count messages from providers that are unread
-            unread_query = select(func.count(Message.id)).join(
-                MessageThread, Message.thread_id == MessageThread.id
-            ).filter(
-                and_(
-                    MessageThread.patient_id == patient.id,
-                    MessageThread.clinic_id == current_user.clinic_id,
-                    Message.sender_type != "patient",
-                    Message.status != MessageStatus.READ.value
-                )
-            )
-        else:
-            # Staff: count messages from patients that are unread
-            unread_query = select(func.count(Message.id)).join(
-                MessageThread, Message.thread_id == MessageThread.id
-            ).filter(
-                and_(
-                    MessageThread.provider_id == current_user.id,
-                    MessageThread.clinic_id == current_user.clinic_id,
-                    Message.sender_type == "patient",
-                    Message.status != MessageStatus.READ.value
-                )
-            )
-        
-        unread_result = await db.execute(unread_query)
-        unread_message_count = unread_result.scalar() or 0
-        
-        # Add message notification if there are unread messages
-        if unread_message_count > 0:
-            notifications.append({
-                "id": f"messages:unread",
-                "kind": "message",
-                "source_id": 0,
-                "title": f"{unread_message_count} mensagem{'s' if unread_message_count > 1 else ''} não lida{'s' if unread_message_count > 1 else ''}",
-                "message": f"Você tem {unread_message_count} mensagem{'s' if unread_message_count > 1 else ''} não lida{'s' if unread_message_count > 1 else ''}.",
-                "type": "info",
-                "priority": "high" if unread_message_count > 5 else "medium",
-                "read": False,
-                "timestamp": now.isoformat(),
-                "source": "Mensagens",
-                "actionUrl": "/patient/messages" if patient else "/secretaria/mensagens",
-                "actionText": "Ver mensagens",
-            })
-    except Exception as e:
-        # Log error but don't fail the entire endpoint
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Failed to count unread messages: {str(e)}")
-        # Continue without message notifications
-
-    # Patients: upcoming appointments within next 7 days
-    # Check role as string to handle both enum and string values
     is_patient = str(current_user.role).lower() == "patient" if current_user.role else False
-    if is_patient:
-        # Use patient from earlier query if available, otherwise query again
-        if patient is None:
+
+    try:
+        # Run all queries in parallel for better performance
+        if is_patient:
+            # Patient: get patient record and unread messages in parallel
             patient_query = select(Patient).filter(
                 and_(
                     Patient.email == current_user.email,
                     Patient.clinic_id == current_user.clinic_id
                 )
             )
+            
+            # Execute patient query
             patient_result = await db.execute(patient_query)
             patient = patient_result.scalar_one_or_none()
-        
-        if patient:
-            try:
+            
+            if patient:
+                # Patient: count messages from providers that are unread
+                unread_query = select(func.count(Message.id)).join(
+                    MessageThread, Message.thread_id == MessageThread.id
+                ).filter(
+                    and_(
+                        MessageThread.patient_id == patient.id,
+                        MessageThread.clinic_id == current_user.clinic_id,
+                        Message.sender_type != "patient",
+                        Message.status != MessageStatus.READ.value
+                    )
+                )
+                
+                # Get appointments and unread messages in parallel
                 appt_stmt = (
                     select(Appointment)
                     .where(
@@ -130,10 +81,37 @@ async def list_notifications(
                     .order_by(Appointment.scheduled_datetime)
                     .limit(50)
                 )
-                appts = (await db.execute(appt_stmt)).scalars().all()
-                for a in appts:
-                    notifications.append(
-                        {
+                
+                unread_result, appts_result = await asyncio.gather(
+                    db.execute(unread_query),
+                    db.execute(appt_stmt),
+                    return_exceptions=True
+                )
+                
+                # Process unread messages
+                if not isinstance(unread_result, Exception):
+                    unread_message_count = unread_result.scalar() or 0
+                    if unread_message_count > 0:
+                        notifications.append({
+                            "id": f"messages:unread",
+                            "kind": "message",
+                            "source_id": 0,
+                            "title": f"{unread_message_count} mensagem{'s' if unread_message_count > 1 else ''} não lida{'s' if unread_message_count > 1 else ''}",
+                            "message": f"Você tem {unread_message_count} mensagem{'s' if unread_message_count > 1 else ''} não lida{'s' if unread_message_count > 1 else ''}.",
+                            "type": "info",
+                            "priority": "high" if unread_message_count > 5 else "medium",
+                            "read": False,
+                            "timestamp": now.isoformat(),
+                            "source": "Mensagens",
+                            "actionUrl": "/patient/messages",
+                            "actionText": "Ver mensagens",
+                        })
+                
+                # Process appointments
+                if not isinstance(appts_result, Exception):
+                    appts = appts_result.scalars().all()
+                    for a in appts:
+                        notifications.append({
                             "id": f"appt:{a.id}",
                             "kind": "appointment",
                             "source_id": a.id,
@@ -146,93 +124,126 @@ async def list_notifications(
                             "source": "Agendamentos",
                             "actionUrl": "/patient/appointments",
                             "actionText": "Ver consulta",
-                        }
+                        })
+            else:
+                # No patient record found, return empty notifications
+                return {"data": notifications}
+        else:
+            # Staff: run all queries in parallel
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end = today_start + timedelta(days=1)
+            
+            # Staff: count messages from patients that are unread
+            unread_query = select(func.count(Message.id)).join(
+                MessageThread, Message.thread_id == MessageThread.id
+            ).filter(
+                and_(
+                    MessageThread.provider_id == current_user.id,
+                    MessageThread.clinic_id == current_user.clinic_id,
+                    Message.sender_type == "patient",
+                    Message.status != MessageStatus.READ.value
+                )
+            )
+            
+            # Stock alerts query
+            alerts_stmt = (
+                select(StockAlert)
+                .where(
+                    and_(
+                        StockAlert.clinic_id == current_user.clinic_id,
+                        StockAlert.is_resolved == False,  # noqa: E712
                     )
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning(f"Failed to load patient appointments: {str(e)}")
+                )
+                .order_by(desc(StockAlert.created_at))
+                .limit(100)
+            )
+            
+            # Today's appointments query
+            appt_stmt = (
+                select(Appointment)
+                .where(
+                    and_(
+                        Appointment.clinic_id == current_user.clinic_id,
+                        Appointment.scheduled_datetime >= today_start,
+                        Appointment.scheduled_datetime < today_end,
+                    )
+                )
+                .order_by(Appointment.scheduled_datetime)
+                .limit(50)
+            )
+            
+            # Execute all queries in parallel
+            unread_result, alerts_result, appts_result = await asyncio.gather(
+                db.execute(unread_query),
+                db.execute(alerts_stmt),
+                db.execute(appt_stmt),
+                return_exceptions=True
+            )
+            
+            # Process unread messages
+            if not isinstance(unread_result, Exception):
+                unread_message_count = unread_result.scalar() or 0
+                if unread_message_count > 0:
+                    notifications.append({
+                        "id": f"messages:unread",
+                        "kind": "message",
+                        "source_id": 0,
+                        "title": f"{unread_message_count} mensagem{'s' if unread_message_count > 1 else ''} não lida{'s' if unread_message_count > 1 else ''}",
+                        "message": f"Você tem {unread_message_count} mensagem{'s' if unread_message_count > 1 else ''} não lida{'s' if unread_message_count > 1 else ''}.",
+                        "type": "info",
+                        "priority": "high" if unread_message_count > 5 else "medium",
+                        "read": False,
+                        "timestamp": now.isoformat(),
+                        "source": "Mensagens",
+                        "actionUrl": "/secretaria/mensagens",
+                        "actionText": "Ver mensagens",
+                    })
+            
+            # Process stock alerts
+            if not isinstance(alerts_result, Exception):
+                alerts = alerts_result.scalars().all()
+                for alert in alerts:
+                    priority = "urgent" if getattr(alert, "severity", "").lower() in {"high", "critical"} else "high"
+                    notifications.append({
+                        "id": f"stock:{alert.id}",
+                        "kind": "stock",
+                        "source_id": alert.id,
+                        "title": getattr(alert, "title", "Alerta de estoque"),
+                        "message": getattr(alert, "message", "Produto com baixo estoque"),
+                        "type": "warning",
+                        "priority": priority,
+                        "read": False,
+                        "timestamp": (getattr(alert, "created_at", now) or now).isoformat(),
+                        "source": "Estoque",
+                        "actionUrl": "/estoque",
+                        "actionText": "Abrir estoque",
+                    })
+            
+            # Process appointments
+            if not isinstance(appts_result, Exception):
+                appts = appts_result.scalars().all()
+                for a in appts:
+                    notifications.append({
+                        "id": f"appt:{a.id}",
+                        "kind": "appointment",
+                        "source_id": a.id,
+                        "title": "Consulta de hoje",
+                        "message": "Consulta agendada para hoje.",
+                        "type": "info",
+                        "priority": "medium",
+                        "read": False,
+                        "timestamp": (a.scheduled_datetime or now).isoformat(),
+                        "source": "Agendamentos",
+                        "actionUrl": "/secretaria/agendamentos",
+                        "actionText": "Ver agenda",
+                    })
         
         return {"data": notifications}
-
-    # Staff: unresolved stock alerts
-    try:
-        alerts_stmt = (
-            select(StockAlert)
-            .where(
-                and_(
-                    StockAlert.clinic_id == current_user.clinic_id,
-                    StockAlert.is_resolved == False,  # noqa: E712
-                )
-            )
-            .order_by(desc(StockAlert.created_at))
-            .limit(100)
-        )
-        alerts = (await db.execute(alerts_stmt)).scalars().all()
-        for alert in alerts:
-            priority = "urgent" if getattr(alert, "severity", "").lower() in {"high", "critical"} else "high"
-            notifications.append({
-                "id": f"stock:{alert.id}",
-                "kind": "stock",
-                "source_id": alert.id,
-                "title": getattr(alert, "title", "Alerta de estoque"),
-                "message": getattr(alert, "message", "Produto com baixo estoque"),
-                "type": "warning",
-                "priority": priority,
-                "read": False,
-                "timestamp": (getattr(alert, "created_at", now) or now).isoformat(),
-                "source": "Estoque",
-                "actionUrl": "/estoque",
-                "actionText": "Abrir estoque",
-            }
-        )
+        
     except Exception as e:
-        # Log error but don't fail the entire endpoint
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Failed to load stock alerts: {str(e)}")
-        # Continue without stock alert notifications
-
-    # Staff: upcoming appointments today (overview)
-    try:
-        appt_stmt = (
-            select(Appointment)
-            .where(
-                and_(
-                    Appointment.clinic_id == current_user.clinic_id,
-                    Appointment.scheduled_datetime >= now.replace(hour=0, minute=0, second=0, microsecond=0),
-                    Appointment.scheduled_datetime < (now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)),
-                )
-            )
-            .order_by(Appointment.scheduled_datetime)
-            .limit(50)
-        )
-        appts = (await db.execute(appt_stmt)).scalars().all()
-        for a in appts:
-            notifications.append(
-                {
-                    "id": f"appt:{a.id}",
-                    "kind": "appointment",
-                    "source_id": a.id,
-                    "title": "Consulta de hoje",
-                    "message": "Consulta agendada para hoje.",
-                    "type": "info",
-                    "priority": "medium",
-                    "read": False,
-                    "timestamp": (a.scheduled_datetime or now).isoformat(),
-                    "source": "Agendamentos",
-                    "actionUrl": "/secretaria/agendamentos",
-                    "actionText": "Ver agenda",
-                }
-            )
-    except Exception as e:
-        # Log error but don't fail the entire endpoint
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Failed to load appointments: {str(e)}")
-        # Continue without appointment notifications
-
-    return {"data": notifications}
+        logger.error(f"Error loading notifications: {str(e)}", exc_info=True)
+        # Return empty notifications instead of failing
+        return {"data": []}
 
 
 @router.post("/{kind}/{source_id}/read")
