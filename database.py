@@ -11,7 +11,7 @@ load_dotenv()
 # CRITICAL: Never hardcode production credentials. Always use environment variables.
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://user:password@localhost:5432/prontivus_clinic"  # Default for local development only
+    "mysql+aiomysql://user:password@localhost:3306/prontivus_clinic"  # Default for local development only
 )
 
 # Create async engine
@@ -41,13 +41,8 @@ try:
         pool_timeout=POOL_TIMEOUT,  # Seconds to wait for a connection
         pool_recycle=POOL_RECYCLE,  # Recycle connections after this many seconds
         connect_args={
-            "server_settings": {
-                "application_name": "prontivus_backend",
-                "tcp_keepalives_idle": "600",  # Start keepalives after 10 minutes of inactivity
-                "tcp_keepalives_interval": "30",  # Send keepalive every 30 seconds
-                "tcp_keepalives_count": "3",  # Close connection after 3 failed keepalives
-            },
-            "command_timeout": 60,  # 60 second timeout for commands
+            "charset": "utf8mb4",  # Support full UTF-8 including emojis
+            "init_command": "SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'",
         },
     )
     logger.info(f"Database engine created with pool_size={POOL_SIZE}, max_overflow={MAX_OVERFLOW}")

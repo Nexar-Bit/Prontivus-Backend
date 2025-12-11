@@ -78,10 +78,27 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_stock_movements_id'), 'stock_movements', ['id'], unique=False)
-    op.drop_index('ix_invoice_lines_invoice_id', table_name='invoice_lines')
-    op.drop_index('ix_invoice_lines_service_item_id', table_name='invoice_lines')
-    op.drop_index('ix_invoices_appointment_id', table_name='invoices')
-    op.drop_index('ix_invoices_clinic_id', table_name='invoices')
+    
+    # Drop indexes only if they exist (for compatibility with existing databases)
+    from sqlalchemy import inspect, text
+    conn = op.get_bind()
+    inspector = inspect(conn)
+    
+    # Get existing indexes for invoice_lines
+    if 'invoice_lines' in inspector.get_table_names():
+        invoice_lines_indexes = [idx['name'] for idx in inspector.get_indexes('invoice_lines')]
+        if 'ix_invoice_lines_invoice_id' in invoice_lines_indexes:
+            op.drop_index('ix_invoice_lines_invoice_id', table_name='invoice_lines')
+        if 'ix_invoice_lines_service_item_id' in invoice_lines_indexes:
+            op.drop_index('ix_invoice_lines_service_item_id', table_name='invoice_lines')
+    
+    # Get existing indexes for invoices
+    if 'invoices' in inspector.get_table_names():
+        invoices_indexes = [idx['name'] for idx in inspector.get_indexes('invoices')]
+        if 'ix_invoices_appointment_id' in invoices_indexes:
+            op.drop_index('ix_invoices_appointment_id', table_name='invoices')
+        if 'ix_invoices_clinic_id' in invoices_indexes:
+            op.drop_index('ix_invoices_clinic_id', table_name='invoices')
     op.drop_index('ix_invoices_patient_id', table_name='invoices')
     op.drop_index('ix_invoices_status', table_name='invoices')
     # ### end Alembic commands ###

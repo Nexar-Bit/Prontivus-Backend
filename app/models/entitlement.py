@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from sqlalchemy import Column, String, Boolean, ForeignKey, JSON, UniqueConstraint, DateTime
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import CHAR
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -18,11 +18,11 @@ class Entitlement(Base):
     
     __tablename__ = "entitlements"
     
-    # Primary key
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    # Primary key (using CHAR(36) for MySQL compatibility)
+    id = Column(CHAR(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     
-    # License relationship
-    license_id = Column(UUID(as_uuid=True), ForeignKey("licenses.id"), nullable=False, index=True)
+    # License relationship (using CHAR(36) for MySQL compatibility)
+    license_id = Column(CHAR(36), ForeignKey("licenses.id"), nullable=False, index=True)
     
     # Module information
     module = Column(String(50), nullable=False, index=True)

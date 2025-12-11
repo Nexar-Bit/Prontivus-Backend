@@ -8,7 +8,7 @@ from sqlalchemy import (
     ForeignKey, Enum as SQLEnum, JSON, Numeric
 )
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import CHAR
 from sqlalchemy.sql import func
 from database import Base
 import enum
@@ -79,7 +79,7 @@ class Clinic(BaseModel):
     active_modules = Column(JSON, nullable=True, default=list)  # List of enabled modules
     
     # New Licensing System (one-to-one with License via UUID)
-    license_id = Column(UUID(as_uuid=True), ForeignKey("licenses.id"), nullable=True, unique=True, index=True)
+    license_id = Column(CHAR(36), ForeignKey("licenses.id"), nullable=True, unique=True, index=True)
     
     # Status
     is_active = Column(Boolean, default=True, nullable=False)

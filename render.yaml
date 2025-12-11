@@ -7,7 +7,8 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
-        # Use the Internal Database URL from your PostgreSQL service
+        # MySQL Database URL - Set in Render dashboard Environment Variables
+        # Format: mysql+aiomysql://user:password@host:port/database
       - key: SECRET_KEY
         generateValue: true
         # IMPORTANT: Generate a strong secret key and set it manually

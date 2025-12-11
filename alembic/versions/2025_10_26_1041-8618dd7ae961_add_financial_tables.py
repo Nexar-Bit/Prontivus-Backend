@@ -19,27 +19,35 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create service_items table
-    op.create_table('service_items',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('name', sa.String(length=200), nullable=False),
-        sa.Column('description', sa.Text(), nullable=True),
-        sa.Column('code', sa.String(length=50), nullable=True),
-        sa.Column('price', sa.Numeric(precision=10, scale=2), nullable=False),
-        sa.Column('category', sa.Enum('consultation', 'procedure', 'exam', 'medication', 'other', name='servicecategory'), nullable=False),
-        sa.Column('is_active', sa.Boolean(), nullable=False),
-        sa.Column('clinic_id', sa.Integer(), nullable=False),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
-        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(['clinic_id'], ['clinics.id'], ),
-        sa.PrimaryKeyConstraint('id')
-    )
-    op.create_index(op.f('ix_service_items_id'), 'service_items', ['id'], unique=False)
-    op.create_index(op.f('ix_service_items_name'), 'service_items', ['name'], unique=False)
-    op.create_index(op.f('ix_service_items_code'), 'service_items', ['code'], unique=False)
+    # Check if service_items table already exists (it was created in previous migration 47494eee1dd5)
+    from sqlalchemy import inspect
+    conn = op.get_bind()
+    inspector = inspect(conn)
+    existing_tables = inspector.get_table_names()
+    
+    # Only create service_items if it doesn't exist
+    if 'service_items' not in existing_tables:
+        op.create_table('service_items',
+            sa.Column('id', sa.Integer(), nullable=False),
+            sa.Column('name', sa.String(length=200), nullable=False),
+            sa.Column('description', sa.Text(), nullable=True),
+            sa.Column('code', sa.String(length=50), nullable=True),
+            sa.Column('price', sa.Numeric(precision=10, scale=2), nullable=False),
+            sa.Column('category', sa.Enum('consultation', 'procedure', 'exam', 'medication', 'other', name='servicecategory'), nullable=False),
+            sa.Column('is_active', sa.Boolean(), nullable=False),
+            sa.Column('clinic_id', sa.Integer(), nullable=False),
+            sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
+            sa.Column('updated_at', sa.DateTime(timezone=True), nullable=True),
+            sa.ForeignKeyConstraint(['clinic_id'], ['clinics.id'], ),
+            sa.PrimaryKeyConstraint('id')
+        )
+        op.create_index(op.f('ix_service_items_id'), 'service_items', ['id'], unique=False)
+        op.create_index(op.f('ix_service_items_name'), 'service_items', ['name'], unique=False)
+        op.create_index(op.f('ix_service_items_code'), 'service_items', ['code'], unique=False)
 
-    # Create invoices table
-    op.create_table('invoices',
+    # Create invoices table (only if it doesn't exist)
+    if 'invoices' not in existing_tables:
+        op.create_table('invoices',
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('patient_id', sa.Integer(), nullable=False),
         sa.Column('appointment_id', sa.Integer(), nullable=True),
@@ -56,10 +64,11 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(['clinic_id'], ['clinics.id'], ),
         sa.PrimaryKeyConstraint('id')
     )
-    op.create_index(op.f('ix_invoices_id'), 'invoices', ['id'], unique=False)
+        op.create_index(op.f('ix_invoices_id'), 'invoices', ['id'], unique=False)
 
-    # Create invoice_lines table
-    op.create_table('invoice_lines',
+    # Create invoice_lines table (only if it doesn't exist)
+    if 'invoice_lines' not in existing_tables:
+        op.create_table('invoice_lines',
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('invoice_id', sa.Integer(), nullable=False),
         sa.Column('service_item_id', sa.Integer(), nullable=False),
@@ -72,7 +81,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(['service_item_id'], ['service_items.id'], ),
         sa.PrimaryKeyConstraint('id')
     )
-    op.create_index(op.f('ix_invoice_lines_id'), 'invoice_lines', ['id'], unique=False)
+        op.create_index(op.f('ix_invoice_lines_id'), 'invoice_lines', ['id'], unique=False)
 
 
 def downgrade() -> None:

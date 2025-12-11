@@ -5,7 +5,7 @@ Voice processing models for clinical documentation
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, DateTime, LargeBinary, ForeignKey, Text
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import UUID
+# UUID import removed - not used in this file
 import uuid
 
 from database import Base

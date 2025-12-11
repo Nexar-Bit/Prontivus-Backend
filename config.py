@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     # Database Settings
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
-        "postgresql+asyncpg://user:password@localhost:5432/prontivus_clinic"
+        "mysql+aiomysql://user:password@localhost:3306/prontivus_clinic"
     )
     
     # Security Settings

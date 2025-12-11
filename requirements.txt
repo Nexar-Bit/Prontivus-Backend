@@ -6,7 +6,8 @@ passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
 pydantic-settings==2.1.0
 alembic==1.14.0
-asyncpg==0.30.0
+aiomysql>=0.3.2
+pymysql>=1.1.2
 # greenlet is installed automatically by SQLAlchemy, but we can specify a compatible version
 # Using latest version that supports Python 3.12
 greenlet>=3.1.0
