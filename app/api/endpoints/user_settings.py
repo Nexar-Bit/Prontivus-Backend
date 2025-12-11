@@ -14,6 +14,7 @@ from PIL import Image
 import io
 
 from app.core.auth import get_current_user
+from app.core.cache import analytics_cache
 from app.models import User, UserSettings
 from app.schemas.user_settings import (
     UserSettingsUpdate,
@@ -59,7 +60,14 @@ async def get_user_settings(
     """
     Get current user's settings
     Returns settings with profile information
+    Uses caching to improve performance (2 minute TTL).
     """
+    # Check cache first (2 minute TTL for user settings)
+    cache_key = f"user_settings:user_{current_user.id}"
+    cached_result = analytics_cache.get(cache_key)
+    if cached_result:
+        return UserSettingsFullResponse.model_validate(cached_result)
+    
     # Get or create user settings
     result = await db.execute(
         select(UserSettings).where(UserSettings.user_id == current_user.id)
@@ -69,7 +77,7 @@ async def get_user_settings(
     # If no settings exist, return defaults
     if not user_settings:
         defaults = get_default_settings()
-        return UserSettingsFullResponse(
+        result = UserSettingsFullResponse(
             profile={
                 "firstName": current_user.first_name or "",
                 "lastName": current_user.last_name or "",
@@ -82,11 +90,14 @@ async def get_user_settings(
             appearance=defaults["appearance"],
             security=defaults["security"],
         )
+        # Cache the result for 2 minutes
+        analytics_cache.set(cache_key, result.model_dump(), ttl=120)
+        return result
     
     # Return settings with profile info
     # Use get() to handle None values, but preserve empty dicts
     defaults = get_default_settings()
-    return UserSettingsFullResponse(
+    result = UserSettingsFullResponse(
         profile={
             "firstName": current_user.first_name or "",
             "lastName": current_user.last_name or "",
@@ -99,6 +110,9 @@ async def get_user_settings(
         appearance=user_settings.appearance if user_settings.appearance is not None else defaults["appearance"],
         security=user_settings.security if user_settings.security is not None else defaults["security"],
     )
+    # Cache the result for 2 minutes
+    analytics_cache.set(cache_key, result.model_dump(), ttl=120)
+    return result
 
 
 @router.put("/me", response_model=UserSettingsResponse)
@@ -163,6 +177,10 @@ async def update_user_settings(
         # Verify the data was saved
         if user_settings.notifications is None or user_settings.privacy is None:
             raise ValueError("Settings were not properly saved to database")
+        
+        # Invalidate cache
+        cache_key = f"user_settings:user_{current_user.id}"
+        analytics_cache.delete(cache_key)
         
         return UserSettingsResponse.model_validate(user_settings)
     except Exception as e:

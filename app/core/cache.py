@@ -148,6 +148,11 @@ class AnalyticsCache:
         # Note: Redis storage is async, so we rely on memory cache for sync access
         # The async cache_manager will be used by async endpoints directly
     
+    def delete(self, key: str):
+        """Delete a specific key from cache"""
+        if key in self._memory_cache:
+            del self._memory_cache[key]
+    
     def clear(self):
         """Clear all cached data"""
         self._memory_cache.clear()

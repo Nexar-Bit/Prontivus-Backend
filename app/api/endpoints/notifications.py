@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_async_session
 from app.core.auth import get_current_user
+from app.core.cache import analytics_cache
 from app.models import User, UserRole, Appointment, Patient
 from app.models.stock import StockAlert
 from app.models.message import MessageThread, Message, MessageStatus
@@ -34,7 +35,15 @@ async def list_notifications(
     - Staff (admin/secretary/doctor): unresolved stock alerts, recent appointments, and unread messages
     - Patient: upcoming appointments and unread messages
     Optimized to run queries in parallel for better performance.
+    Uses caching to improve performance (30 second TTL).
     """
+    # Check cache first (30 second TTL for notifications)
+    cache_key = f"notifications:user_{current_user.id}"
+    cached_result = analytics_cache.get(cache_key)
+    if cached_result:
+        logger.info(f"Returning cached notifications for user {current_user.id}")
+        return cached_result
+    
     notifications: list[dict] = []
     now = datetime.now(timezone.utc)
     is_patient = str(current_user.role).lower() == "patient" if current_user.role else False
@@ -238,7 +247,10 @@ async def list_notifications(
                         "actionText": "Ver agenda",
                     })
         
-        return {"data": notifications}
+        result = {"data": notifications}
+        # Cache the result for 30 seconds
+        analytics_cache.set(cache_key, result, ttl=30)
+        return result
         
     except Exception as e:
         logger.error(f"Error loading notifications: {str(e)}", exc_info=True)
