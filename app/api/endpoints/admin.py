@@ -1141,6 +1141,16 @@ async def delete_clinic(
                     except Exception as rollback_error:
                         logger.warning(f"Error during rollback/restart: {rollback_error}")
                     return  # Table doesn't exist, skip
+                # Handle "unknown column" errors - table exists but schema is different
+                if "unknown column" in error_msg:
+                    logger.warning(f"Optional table {table_name} has different schema (unknown column), skipping")
+                    try:
+                        await db.rollback()
+                        # Restart transaction by executing a simple query
+                        await db.execute(text("SELECT 1"))
+                    except Exception as rollback_error:
+                        logger.warning(f"Error during rollback/restart: {rollback_error}")
+                    return  # Column doesn't exist, skip this deletion
                 # If transaction is aborted for other reasons, rollback and re-raise
                 if "aborted" in error_msg or "in failed sql transaction" in error_msg:
                     await db.rollback()
@@ -1253,12 +1263,45 @@ async def delete_clinic(
         
         # Delete exam requests (optional - table might not exist)
         # Note: exam_requests references clinical_records, not clinic_id directly
-        await safe_delete_optional("""
-            DELETE er FROM exam_requests er
-            INNER JOIN clinical_records cr ON er.clinical_record_id = cr.id
-            INNER JOIN appointments a ON cr.appointment_id = a.id
-            WHERE a.clinic_id = :clinic_id
-        """, {"clinic_id": clinic_id}, "exam_requests")
+        # Using two-step approach: first get clinical_record_ids, then delete
+        try:
+            logger.info(f"Attempting to delete exam_requests for clinic {clinic_id}")
+            # First, get the clinical_record_ids for this clinic
+            clinical_records_query = text("""
+                SELECT cr.id FROM clinical_records cr
+                INNER JOIN appointments a ON cr.appointment_id = a.id
+                WHERE a.clinic_id = :clinic_id
+            """)
+            result = await db.execute(clinical_records_query, {"clinic_id": clinic_id})
+            rows = result.fetchall()
+            clinical_record_ids = [row[0] for row in rows] if rows else []
+            
+            if clinical_record_ids:
+                # Delete exam_requests for these clinical records using IN clause
+                # Build the query with proper parameter binding
+                ids_str = ','.join([str(cr_id) for cr_id in clinical_record_ids])
+                delete_query = f"DELETE FROM exam_requests WHERE clinical_record_id IN ({ids_str})"
+                await db.execute(text(delete_query))
+                logger.info(f"Successfully deleted exam_requests for {len(clinical_record_ids)} clinical records")
+            else:
+                logger.info(f"No clinical records found for clinic {clinic_id}, skipping exam_requests deletion")
+        except Exception as e:
+            error_msg = str(e).lower()
+            logger.warning(f"Error deleting exam_requests: {error_msg}")
+            # If table doesn't exist or column doesn't exist, just skip
+            if ("does not exist" in error_msg or "undefinedtable" in error_msg or 
+                "table" in error_msg and "doesn't exist" in error_msg or
+                "unknown table" in error_msg or "unknown column" in error_msg):
+                logger.info(f"exam_requests table or column does not exist, skipping")
+                try:
+                    await db.rollback()
+                    await db.execute(text("SELECT 1"))
+                except Exception as rollback_error:
+                    logger.warning(f"Error during rollback/restart: {rollback_error}")
+                return  # Skip this deletion
+            # For other errors, re-raise
+            await db.rollback()
+            raise
         
         # PHASE 2: Delete critical tables (these must succeed)
         # After all optional tables are handled, delete critical tables
