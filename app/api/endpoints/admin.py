@@ -1252,9 +1252,12 @@ async def delete_clinic(
         await safe_delete_optional("DELETE FROM exam_catalog WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "exam_catalog")
         
         # Delete exam requests (optional - table might not exist)
+        # Note: exam_requests references clinical_records, not clinic_id directly
         await safe_delete_optional("""
-            DELETE FROM exam_requests 
-            WHERE clinic_id = :clinic_id
+            DELETE er FROM exam_requests er
+            INNER JOIN clinical_records cr ON er.clinical_record_id = cr.id
+            INNER JOIN appointments a ON cr.appointment_id = a.id
+            WHERE a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "exam_requests")
         
         # PHASE 2: Delete critical tables (these must succeed)
