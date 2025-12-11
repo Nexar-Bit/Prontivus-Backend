@@ -1166,34 +1166,49 @@ async def delete_clinic(
         
         # Delete records that reference appointments (must be deleted before appointments)
         # These are optional tables that might not exist
+        # Note: prescriptions and diagnoses reference clinical_records, not appointments directly
+        # So we need to delete them through clinical_records first
+        
+        # First, delete prescriptions that reference clinical_records linked to appointments
+        # Using JOIN syntax for MySQL compatibility (some MySQL versions don't allow subqueries in DELETE)
         await safe_delete_optional("""
-            DELETE FROM clinical_records 
-            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+            DELETE p FROM prescriptions p
+            INNER JOIN clinical_records cr ON p.clinical_record_id = cr.id
+            INNER JOIN appointments a ON cr.appointment_id = a.id
+            WHERE a.clinic_id = :clinic_id
+        """, {"clinic_id": clinic_id}, "prescriptions")
+        
+        # Then delete diagnoses that reference clinical_records linked to appointments
+        await safe_delete_optional("""
+            DELETE d FROM diagnoses d
+            INNER JOIN clinical_records cr ON d.clinical_record_id = cr.id
+            INNER JOIN appointments a ON cr.appointment_id = a.id
+            WHERE a.clinic_id = :clinic_id
+        """, {"clinic_id": clinic_id}, "diagnoses")
+        
+        # Finally, delete clinical_records that reference appointments
+        await safe_delete_optional("""
+            DELETE cr FROM clinical_records cr
+            INNER JOIN appointments a ON cr.appointment_id = a.id
+            WHERE a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "clinical_records")
         
         await safe_delete_optional("""
-            DELETE FROM prescriptions 
-            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
-        """, {"clinic_id": clinic_id}, "prescriptions")
-        
-        await safe_delete_optional("""
-            DELETE FROM diagnoses 
-            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
-        """, {"clinic_id": clinic_id}, "diagnoses")
-        
-        await safe_delete_optional("""
-            DELETE FROM patient_calls 
-            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+            DELETE pc FROM patient_calls pc
+            INNER JOIN appointments a ON pc.appointment_id = a.id
+            WHERE a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "patient_calls")
         
         await safe_delete_optional("""
-            DELETE FROM file_uploads 
-            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+            DELETE fu FROM file_uploads fu
+            INNER JOIN appointments a ON fu.appointment_id = a.id
+            WHERE a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "file_uploads")
         
         await safe_delete_optional("""
-            DELETE FROM voice_sessions 
-            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+            DELETE vs FROM voice_sessions vs
+            INNER JOIN appointments a ON vs.appointment_id = a.id
+            WHERE a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "voice_sessions (by appointment)")
         
         # Delete stock movements (optional - table might not exist)
@@ -1217,15 +1232,17 @@ async def delete_clinic(
         # Delete voice sessions by user_id (optional - table might not exist)
         # Note: voice_sessions by appointment_id were already deleted above
         await safe_delete_optional("""
-            DELETE FROM voice_sessions 
-            WHERE user_id IN (SELECT id FROM users WHERE clinic_id = :clinic_id)
-               AND appointment_id IS NULL
+            DELETE vs FROM voice_sessions vs
+            INNER JOIN users u ON vs.user_id = u.id
+            WHERE u.clinic_id = :clinic_id
+               AND vs.appointment_id IS NULL
         """, {"clinic_id": clinic_id}, "voice_sessions (by user)")
         
         # Delete user settings (optional - table might not exist)
         await safe_delete_optional("""
-            DELETE FROM user_settings 
-            WHERE user_id IN (SELECT id FROM users WHERE clinic_id = :clinic_id)
+            DELETE us FROM user_settings us
+            INNER JOIN users u ON us.user_id = u.id
+            WHERE u.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "user_settings")
         
         # Delete AI configs (optional - table might not exist)
@@ -1246,24 +1263,34 @@ async def delete_clinic(
         
         # 1. First, clear appointment_id references in invoices (invoices reference appointments)
         await safe_delete("""
-            UPDATE invoices 
-            SET appointment_id = NULL 
-            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+            UPDATE invoices i
+            INNER JOIN appointments a ON i.appointment_id = a.id
+            SET i.appointment_id = NULL 
+            WHERE a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "invoices.appointment_id")
         
         # 2. Delete invoice_lines (must be deleted before invoices)
         await safe_delete_optional("""
-            DELETE FROM invoice_lines 
-            WHERE invoice_id IN (SELECT id FROM invoices WHERE clinic_id = :clinic_id)
+            DELETE il FROM invoice_lines il
+            INNER JOIN invoices i ON il.invoice_id = i.id
+            WHERE i.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "invoice_lines")
         
         # 3. Delete payments (may reference users and invoices)
         # Must be deleted before invoices to avoid foreign key issues
+        # Delete payments linked to invoices from this clinic
         await safe_delete("""
-            DELETE FROM payments 
-            WHERE invoice_id IN (SELECT id FROM invoices WHERE clinic_id = :clinic_id)
-               OR created_by IN (SELECT id FROM users WHERE clinic_id = :clinic_id)
-        """, {"clinic_id": clinic_id}, "payments")
+            DELETE p FROM payments p
+            INNER JOIN invoices i ON p.invoice_id = i.id
+            WHERE i.clinic_id = :clinic_id
+        """, {"clinic_id": clinic_id}, "payments (by invoice)")
+        
+        # Delete payments created by users from this clinic
+        await safe_delete("""
+            DELETE p FROM payments p
+            INNER JOIN users u ON p.created_by = u.id
+            WHERE u.clinic_id = :clinic_id
+        """, {"clinic_id": clinic_id}, "payments (by user)")
         
         # 4. Delete invoices (must be deleted before appointments since invoices reference appointments)
         # Note: We already cleared appointment_id references above, so this should be safe
