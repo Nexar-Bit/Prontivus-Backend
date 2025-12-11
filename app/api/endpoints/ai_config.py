@@ -127,7 +127,8 @@ async def _get_or_create_ai_config(
             max_tokens=default_config["max_tokens"],
             temperature=default_config["temperature"],
             features=default_config["features"],
-            usage_stats=default_config["usage_stats"]
+            usage_stats=default_config["usage_stats"],
+            created_at=datetime.now(timezone.utc)  # Explicitly set created_at for MySQL compatibility
         )
         db.add(config)
         await db.commit()
