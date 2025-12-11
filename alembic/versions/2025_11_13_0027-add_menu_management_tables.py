@@ -8,7 +8,7 @@ Create Date: 2025-11-13 00:27:00.000000
 from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
+# MySQL compatible - using JSON type directly
 
 # revision identifiers, used by Alembic.
 revision: str = 'add_menu_management'
@@ -59,7 +59,7 @@ def upgrade() -> None:
         sa.Column('route', sa.String(length=200), nullable=False),
         sa.Column('icon', sa.String(length=50), nullable=True),
         sa.Column('order_index', sa.Integer(), nullable=False, server_default='0'),
-        sa.Column('permissions_required', postgresql.JSON(astext_type=sa.Text()), nullable=True),
+        sa.Column('permissions_required', sa.JSON, nullable=True),
         sa.Column('description', sa.Text(), nullable=True),
         sa.Column('is_active', sa.Boolean(), nullable=False, server_default='true'),
         sa.Column('is_external', sa.Boolean(), nullable=False, server_default='false'),
@@ -86,7 +86,7 @@ def upgrade() -> None:
 
     # Add role_id and permissions columns to users table
     op.add_column('users', sa.Column('role_id', sa.Integer(), nullable=True))
-    op.add_column('users', sa.Column('permissions', postgresql.JSON(astext_type=sa.Text()), nullable=True))
+    op.add_column('users', sa.Column('permissions', sa.JSON, nullable=True))
     op.create_index('ix_users_role_id', 'users', ['role_id'], unique=False)
     op.create_foreign_key('fk_users_role_id', 'users', 'user_roles', ['role_id'], ['id'])
 
