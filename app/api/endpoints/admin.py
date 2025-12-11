@@ -1043,6 +1043,28 @@ async def delete_clinic(
             detail="Clinic not found"
         )
     
+    # Prevent deletion of default clinic (ID 1) or clinic with SuperAdmin users
+    if clinic_id == 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Não é possível excluir a clínica padrão do sistema."
+        )
+    
+    # Check if this clinic has SuperAdmin users
+    superadmin_query = select(User).filter(
+        User.clinic_id == clinic_id,
+        User.role == "admin",
+        User.role_id == 1  # SuperAdmin role_id
+    )
+    superadmin_result = await db.execute(superadmin_query)
+    superadmin_users = superadmin_result.scalars().all()
+    
+    if superadmin_users:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Não é possível excluir uma clínica que possui usuários SuperAdmin. Remova os usuários SuperAdmin antes de excluir a clínica."
+        )
+    
     # Store clinic info for logging before deletion
     clinic_name = clinic.name
     clinic_id_for_log = clinic.id
@@ -1063,25 +1085,32 @@ async def delete_clinic(
         async def safe_delete(query: str, params: dict, table_name: str = "", optional: bool = False):
             """Execute DELETE query, handling errors gracefully"""
             try:
+                logger.info(f"Attempting to delete from {table_name} for clinic {clinic_id}")
                 await db.execute(text(query), params)
+                logger.info(f"Successfully deleted from {table_name} for clinic {clinic_id}")
             except Exception as e:
                 error_msg = str(e).lower()
+                logger.warning(f"Error deleting from {table_name}: {error_msg}")
                 # If table doesn't exist and it's optional, just continue
-                if optional and ("does not exist" in error_msg or "undefinedtable" in error_msg):
+                if optional and ("does not exist" in error_msg or "undefinedtable" in error_msg or "table" in error_msg and "doesn't exist" in error_msg):
+                    logger.info(f"Table {table_name} does not exist, skipping (optional)")
                     return  # Table doesn't exist, skip
                 # If transaction is aborted, rollback and re-raise immediately
                 if "aborted" in error_msg or "in failed sql transaction" in error_msg:
                     await db.rollback()
+                    logger.error(f"Transaction aborted while deleting {table_name}")
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail=f"Erro ao processar exclusão de {table_name}. A operação foi interrompida. Por favor, tente novamente."
                     )
                 # For foreign key errors, provide a user-friendly message
-                if "foreign key" in error_msg or "constraint" in error_msg or "violates foreign key" in error_msg:
+                if "foreign key" in error_msg or "constraint" in error_msg or "violates foreign key" in error_msg or "cannot delete" in error_msg:
                     await db.rollback()
+                    logger.error(f"Foreign key constraint error while deleting {table_name}: {error_msg}")
                     # This will be caught by the outer exception handler which has better messaging
                     raise
-                # For other errors, rollback and re-raise (will be caught by outer handler)
+                # For other errors, log and re-raise (will be caught by outer handler)
+                logger.error(f"Unexpected error deleting from {table_name}: {error_msg}")
                 await db.rollback()
                 raise
         
@@ -1092,27 +1121,44 @@ async def delete_clinic(
         async def safe_delete_optional(query: str, params: dict, table_name: str):
             """Delete from optional table, handling errors gracefully - skip if table doesn't exist"""
             try:
+                logger.info(f"Attempting to delete from optional table {table_name} for clinic {clinic_id}")
                 await db.execute(text(query), params)
+                logger.info(f"Successfully deleted from optional table {table_name} for clinic {clinic_id}")
             except Exception as e:
                 error_msg = str(e).lower()
-                # If table doesn't exist, PostgreSQL aborts the transaction
+                logger.warning(f"Error deleting from optional table {table_name}: {error_msg}")
+                # If table doesn't exist, MySQL/PostgreSQL may abort the transaction
                 # We need to rollback and restart the transaction
-                if "does not exist" in error_msg or "undefinedtable" in error_msg:
+                if ("does not exist" in error_msg or "undefinedtable" in error_msg or 
+                    "table" in error_msg and "doesn't exist" in error_msg or
+                    "unknown table" in error_msg):
                     # Rollback to clear the aborted transaction
-                    await db.rollback()
-                    # Restart transaction by executing a simple query
-                    await db.execute(text("SELECT 1"))
+                    logger.info(f"Optional table {table_name} does not exist, skipping")
+                    try:
+                        await db.rollback()
+                        # Restart transaction by executing a simple query
+                        await db.execute(text("SELECT 1"))
+                    except Exception as rollback_error:
+                        logger.warning(f"Error during rollback/restart: {rollback_error}")
                     return  # Table doesn't exist, skip
                 # If transaction is aborted for other reasons, rollback and re-raise
                 if "aborted" in error_msg or "in failed sql transaction" in error_msg:
                     await db.rollback()
                     # Restart transaction
                     await db.execute(text("SELECT 1"))
+                    logger.error(f"Transaction aborted while deleting optional table {table_name}")
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail=f"Erro ao deletar {table_name}: Transação abortada. Erro: {str(e)}"
                     )
-                # For any other error, re-raise to be handled by outer exception handler
+                # For foreign key errors, log and re-raise
+                if "foreign key" in error_msg or "constraint" in error_msg:
+                    logger.error(f"Foreign key constraint error while deleting optional table {table_name}: {error_msg}")
+                    await db.rollback()
+                    raise
+                # For any other error, log and re-raise to be handled by outer exception handler
+                logger.error(f"Unexpected error deleting from optional table {table_name}: {error_msg}")
+                await db.rollback()
                 raise
         
         # PHASE 1: Delete all optional tables first (these may cause ROLLBACK if they don't exist)
@@ -1182,6 +1228,18 @@ async def delete_clinic(
             WHERE user_id IN (SELECT id FROM users WHERE clinic_id = :clinic_id)
         """, {"clinic_id": clinic_id}, "user_settings")
         
+        # Delete AI configs (optional - table might not exist)
+        await safe_delete_optional("DELETE FROM ai_configs WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "ai_configs")
+        
+        # Delete exam catalogs (optional - table might not exist)
+        await safe_delete_optional("DELETE FROM exam_catalog WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "exam_catalog")
+        
+        # Delete exam requests (optional - table might not exist)
+        await safe_delete_optional("""
+            DELETE FROM exam_requests 
+            WHERE clinic_id = :clinic_id
+        """, {"clinic_id": clinic_id}, "exam_requests")
+        
         # PHASE 2: Delete critical tables (these must succeed)
         # After all optional tables are handled, delete critical tables
         # This ensures that if there was a ROLLBACK from optional tables, we still have a clean transaction
@@ -1210,9 +1268,12 @@ async def delete_clinic(
         # 4. Delete invoices (must be deleted before appointments since invoices reference appointments)
         # Note: We already cleared appointment_id references above, so this should be safe
         try:
+            logger.info(f"Attempting to delete invoices for clinic {clinic_id}")
             await db.execute(text("DELETE FROM invoices WHERE clinic_id = :clinic_id"), {"clinic_id": clinic_id})
+            logger.info(f"Successfully deleted invoices for clinic {clinic_id}")
         except Exception as e:
             error_msg = str(e).lower()
+            logger.error(f"Error deleting invoices: {error_msg}")
             if "foreign key" in error_msg or "constraint" in error_msg:
                 await db.rollback()
                 raise HTTPException(
@@ -1224,9 +1285,12 @@ async def delete_clinic(
         # 5. Now we can safely delete appointments (they reference users and patients)
         # All references to appointments have been cleared or deleted
         try:
+            logger.info(f"Attempting to delete appointments for clinic {clinic_id}")
             await db.execute(text("DELETE FROM appointments WHERE clinic_id = :clinic_id"), {"clinic_id": clinic_id})
+            logger.info(f"Successfully deleted appointments for clinic {clinic_id}")
         except Exception as e:
             error_msg = str(e).lower()
+            logger.error(f"Error deleting appointments: {error_msg}")
             if "foreign key" in error_msg or "constraint" in error_msg:
                 await db.rollback()
                 raise HTTPException(
@@ -1257,15 +1321,28 @@ async def delete_clinic(
         
         # Finally, delete the clinic itself
         try:
+            logger.info(f"Attempting to delete clinic {clinic_id} (name: {clinic_name})")
             await db.execute(text("DELETE FROM clinics WHERE id = :clinic_id"), {"clinic_id": clinic_id})
             await db.commit()
+            logger.info(f"Successfully deleted clinic {clinic_id} (name: {clinic_name})")
+            
+            # Log the deletion
+            try:
+                system_log = SystemLog(
+                    level="info",
+                    source="admin",
+                    message=f"Clinic '{clinic_name}' (ID: {clinic_id_for_log}) was deleted by {deleted_by}",
+                    metadata={"clinic_id": clinic_id_for_log, "clinic_name": clinic_name, "deleted_by": deleted_by}
+                )
+                db.add(system_log)
+                await db.commit()
+            except Exception as log_error:
+                logger.warning(f"Failed to create system log for clinic deletion: {log_error}")
         except Exception as delete_error:
             await db.rollback()
             error_msg = str(delete_error)
             # Log the full error for debugging
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to delete clinic {clinic_id}: {error_msg}")
+            logger.error(f"Failed to delete clinic {clinic_id}: {error_msg}", exc_info=True)
             
             # Check for foreign key constraint errors
             if "foreign key" in error_msg.lower() or "constraint" in error_msg.lower() or "violates foreign key" in error_msg.lower():
@@ -1325,8 +1402,6 @@ async def delete_clinic(
         await db.rollback()
         error_msg = str(e)
         # Log the full error for debugging
-        import logging
-        logger = logging.getLogger(__name__)
         logger.error(f"Unexpected error deleting clinic {clinic_id}: {error_msg}", exc_info=True)
         
         # Check for foreign key constraint errors
@@ -1376,14 +1451,21 @@ async def delete_clinic(
                     detail="Não é possível excluir esta clínica porque existem registros relacionados que impedem a exclusão. Para excluir a clínica, você precisa primeiro remover ou transferir todos os registros relacionados (licenças, usuários, pacientes, agendamentos, etc.). Acesse cada seção do sistema e remova os registros antes de tentar excluir a clínica novamente."
                 )
         # Check for missing table errors
-        if "does not exist" in error_msg.lower() or "undefinedtable" in error_msg.lower():
+        if ("does not exist" in error_msg.lower() or "undefinedtable" in error_msg.lower() or 
+            "unknown table" in error_msg.lower() or "table" in error_msg.lower() and "doesn't exist" in error_msg.lower()):
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Erro ao excluir clínica: Tabela não encontrada no banco de dados. Por favor, verifique as migrações do banco de dados ou entre em contato com o suporte técnico."
+                detail=f"Erro ao excluir clínica: Tabela não encontrada no banco de dados. Erro: {error_msg}. Por favor, verifique as migrações do banco de dados ou entre em contato com o suporte técnico."
+            )
+        # Check for MySQL-specific errors
+        if "cannot delete" in error_msg.lower() or "cannot update" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Não é possível excluir esta clínica devido a restrições no banco de dados. Erro: {error_msg}"
             )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erro ao excluir clínica. Por favor, tente novamente. Se o problema persistir, entre em contato com o suporte."
+            detail=f"Erro ao excluir clínica: {error_msg}. Por favor, tente novamente. Se o problema persistir, entre em contato com o suporte."
         )
     
     return {"message": "Clinic deleted successfully"}
