@@ -58,142 +58,159 @@ async def login(
     Raises:
         HTTPException: If credentials are invalid
     """
-    # Authenticate user
-    user = await authenticate_user(
-        db,
-        login_data.username_or_email,
-        login_data.password
-    )
+    import logging
+    logger = logging.getLogger(__name__)
     
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username/email or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Verify role if expected_role is provided
-    if login_data.expected_role:
-        expected_role = login_data.expected_role.lower()
-        user_role = user.role.value.lower()
-        
-        if expected_role == "staff":
-            # Staff roles: admin, secretary, doctor
-            if user_role not in ["admin", "secretary", "doctor"]:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Access denied. This login is restricted to staff members only."
-                )
-        elif expected_role == "patient":
-            # Patient role only
-            if user_role != "patient":
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Access denied. This login is restricted to patients only."
-                )
-    
-    # Get user permissions and role from menu service
-    menu_service = MenuService(db)
-    user_role = await menu_service.get_user_role(user.id)
-    user_permissions = await menu_service.get_user_permissions(user.id)
-    menu_structure = await menu_service.get_menu_structure(user.id)
-    
-    # Create token data with permissions
-    token_data = {
-        "user_id": user.id,
-        "username": user.username,
-        "role": user.role.value,
-        "role_id": user.role_id,
-        "role_name": user_role.name if user_role else None,
-        "clinic_id": user.clinic_id,
-        "permissions": list(user_permissions)  # Convert set to list for JSON serialization
-    }
-    
-    # Generate tokens
-    access_token = create_access_token(data=token_data)
-    refresh_token = create_refresh_token(data=token_data)
-    
-    # Load clinic information
-    query = select(User).options(selectinload(User.clinic)).where(User.id == user.id)
-    result = await db.execute(query)
-    user_with_clinic = result.scalar_one()
-    
-    # Prepare user response with role information
-    user_dict = {
-        "id": user_with_clinic.id,
-        "username": user_with_clinic.username,
-        "email": user_with_clinic.email,
-        "first_name": user_with_clinic.first_name,
-        "last_name": user_with_clinic.last_name,
-        "role": user_with_clinic.role,
-        "role_id": user_with_clinic.role_id,
-        "role_name": user_role.name if user_role else None,
-        "is_active": user_with_clinic.is_active,
-        "is_verified": user_with_clinic.is_verified,
-        "clinic_id": user_with_clinic.clinic_id,
-        "clinic": user_with_clinic.clinic,
-    }
-    user_response = UserResponse.model_validate(user_dict)
-    
-    # Send login alert (background task, don't wait for it)
     try:
-        # Get client IP and user agent
-        client_ip = request.client.host if request.client else None
-        user_agent = request.headers.get("user-agent")
+        # Authenticate user
+        user = await authenticate_user(
+            db,
+            login_data.username_or_email,
+            login_data.password
+        )
         
-        # Send alert in background (don't await)
-        # Don't pass db session - let it create its own to avoid session state issues
-        # Use asyncio.create_task to run in background
-        import asyncio
-        asyncio.create_task(send_login_alert(
-            user_id=user.id,
-            login_ip=client_ip,
-            user_agent=user_agent,
-            db=None  # Let it create its own session
-        ))
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username/email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Verify role if expected_role is provided
+        if login_data.expected_role:
+            expected_role = login_data.expected_role.lower()
+            user_role = user.role.value.lower()
+            
+            if expected_role == "staff":
+                # Staff roles: admin, secretary, doctor
+                if user_role not in ["admin", "secretary", "doctor"]:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied. This login is restricted to staff members only."
+                    )
+            elif expected_role == "patient":
+                # Patient role only
+                if user_role != "patient":
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied. This login is restricted to patients only."
+                    )
+        
+        # Get user permissions and role from menu service
+        try:
+            menu_service = MenuService(db)
+            user_role = await menu_service.get_user_role(user.id)
+            user_permissions = await menu_service.get_user_permissions(user.id)
+            menu_structure = await menu_service.get_menu_structure(user.id)
+        except Exception as e:
+            logger.error(f"Error getting menu/permissions for user {user.id}: {str(e)}", exc_info=True)
+            # Fallback: use empty permissions and menu if menu service fails
+            user_role = None
+            user_permissions = set()
+            menu_structure = []
+        
+        # Create token data with permissions
+        token_data = {
+            "user_id": user.id,
+            "username": user.username,
+            "role": user.role.value,
+            "role_id": user.role_id,
+            "role_name": user_role.name if user_role else None,
+            "clinic_id": user.clinic_id,
+            "permissions": list(user_permissions)  # Convert set to list for JSON serialization
+        }
+        
+        # Generate tokens
+        access_token = create_access_token(data=token_data)
+        refresh_token = create_refresh_token(data=token_data)
+        
+        # Load clinic information
+        query = select(User).options(selectinload(User.clinic)).where(User.id == user.id)
+        result = await db.execute(query)
+        user_with_clinic = result.scalar_one()
+        
+        # Prepare user response with role information
+        user_dict = {
+            "id": user_with_clinic.id,
+            "username": user_with_clinic.username,
+            "email": user_with_clinic.email,
+            "first_name": user_with_clinic.first_name,
+            "last_name": user_with_clinic.last_name,
+            "role": user_with_clinic.role,
+            "role_id": user_with_clinic.role_id,
+            "role_name": user_role.name if user_role else None,
+            "is_active": user_with_clinic.is_active,
+            "is_verified": user_with_clinic.is_verified,
+            "clinic_id": user_with_clinic.clinic_id,
+            "clinic": user_with_clinic.clinic,
+        }
+        user_response = UserResponse.model_validate(user_dict)
+        
+        # Send login alert (background task, don't wait for it)
+        try:
+            # Get client IP and user agent
+            client_ip = request.client.host if request.client else None
+            user_agent = request.headers.get("user-agent")
+            
+            # Send alert in background (don't await)
+            # Don't pass db session - let it create its own to avoid session state issues
+            # Use asyncio.create_task to run in background
+            import asyncio
+            asyncio.create_task(send_login_alert(
+                user_id=user.id,
+                login_ip=client_ip,
+                user_agent=user_agent,
+                db=None  # Let it create its own session
+            ))
+        except Exception as e:
+            # Don't fail login if alert fails
+            logger.error(f"Failed to send login alert: {str(e)}")
+        
+        # Convert menu structure to response format (using dict to match schema)
+        menu_response = []
+        for group in menu_structure:
+            menu_items = [
+                {
+                    "id": item["id"],
+                    "group_id": group["id"],
+                    "name": item["name"],
+                    "route": item["route"],
+                    "icon": item.get("icon"),
+                    "order_index": item["order_index"],
+                    "description": item.get("description"),
+                    "badge": item.get("badge"),
+                    "is_external": item.get("is_external", False),
+                    "permissions_required": item.get("permissions_required"),
+                    "is_active": True
+                }
+                for item in group["items"]
+            ]
+            menu_response.append({
+                "id": group["id"],
+                "name": group["name"],
+                "description": group.get("description"),
+                "order_index": group["order_index"],
+                "icon": group.get("icon"),
+                "items": menu_items
+            })
+        
+        return LoginResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            user=user_response,
+            menu=menu_response,
+            permissions=list(user_permissions)
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        # Don't fail login if alert fails
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Failed to send login alert: {str(e)}")
-    
-    # Convert menu structure to response format (using dict to match schema)
-    menu_response = []
-    for group in menu_structure:
-        menu_items = [
-            {
-                "id": item["id"],
-                "group_id": group["id"],
-                "name": item["name"],
-                "route": item["route"],
-                "icon": item.get("icon"),
-                "order_index": item["order_index"],
-                "description": item.get("description"),
-                "badge": item.get("badge"),
-                "is_external": item.get("is_external", False),
-                "permissions_required": item.get("permissions_required"),
-                "is_active": True
-            }
-            for item in group["items"]
-        ]
-        menu_response.append({
-            "id": group["id"],
-            "name": group["name"],
-            "description": group.get("description"),
-            "order_index": group["order_index"],
-            "icon": group.get("icon"),
-            "items": menu_items
-        })
-    
-    return LoginResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_type="bearer",
-        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=user_response,
-        menu=menu_response,
-        permissions=list(user_permissions)
-    )
+        logger.error(f"Login error for user {login_data.username_or_email}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Login failed: {str(e)}"
+        )
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
