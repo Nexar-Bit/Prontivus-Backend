@@ -8,7 +8,7 @@ import secrets
 import string
 import os
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -650,51 +650,70 @@ async def get_clinic(
 @router.post("/clinics")  # Removed response_model to allow admin_user field
 async def create_clinic(
     clinic_data: ClinicCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_session)
 ):
     """
     Create a new clinic
     """
-    # Check if clinic with same tax_id already exists
-    existing_clinic = await db.execute(
-        select(Clinic).filter(Clinic.tax_id == clinic_data.tax_id)
-    )
-    if existing_clinic.scalar_one_or_none():
+    # Run initial checks in parallel for better performance
+    tax_id_check = select(Clinic).filter(Clinic.tax_id == clinic_data.tax_id)
+    license_check = select(Clinic).filter(Clinic.license_key == clinic_data.license_key) if clinic_data.license_key else None
+    admin_role_check = select(UserRole).where(UserRole.name == "AdminClinica")
+    
+    # Execute checks in parallel
+    tasks = [db.execute(tax_id_check), db.execute(admin_role_check)]
+    if license_check:
+        tasks.append(db.execute(license_check))
+    
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Check tax_id
+    existing_clinic_result = results[0]
+    if isinstance(existing_clinic_result, Exception):
+        logger.error(f"Error checking tax_id: {existing_clinic_result}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error checking clinic tax ID"
+        )
+    if existing_clinic_result.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Clinic with this tax ID already exists"
         )
     
-    # Check if license_key is unique (if provided)
+    # Check license_key if provided
     if clinic_data.license_key:
-        existing_license = await db.execute(
-            select(Clinic).filter(Clinic.license_key == clinic_data.license_key)
-        )
-        if existing_license.scalar_one_or_none():
+        license_result = results[2] if len(results) > 2 else None
+        if isinstance(license_result, Exception):
+            logger.error(f"Error checking license_key: {license_result}")
+        elif license_result and license_result.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="License key already exists"
             )
     
-    # Create clinic
-    clinic = Clinic(**clinic_data.model_dump())
-    db.add(clinic)
-    await db.flush()  # Flush to get clinic.id without committing
-    
-    # Get AdminClinica role (role_id = 2)
-    admin_role_query = await db.execute(
-        select(UserRole).where(UserRole.name == "AdminClinica")
-    )
-    admin_role = admin_role_query.scalar_one_or_none()
+    # Get AdminClinica role
+    admin_role_result = results[1]
+    if isinstance(admin_role_result, Exception):
+        logger.error(f"Error fetching AdminClinica role: {admin_role_result}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching admin role"
+        )
+    admin_role = admin_role_result.scalar_one_or_none()
     
     if not admin_role:
-        # If AdminClinica role doesn't exist, rollback and raise error
-        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="AdminClinica role not found. Please run seed script first."
         )
+    
+    # Create clinic
+    clinic = Clinic(**clinic_data.model_dump())
+    db.add(clinic)
+    await db.flush()  # Flush to get clinic.id without committing
     
     # Generate default admin user credentials
     # Use clinic name to create username (sanitized)
@@ -705,36 +724,39 @@ async def create_clinic(
     base_username = f"admin_{clinic_name_slug[:20]}"
     
     # Check if username already exists, if so append clinic id
-    username = base_username
-    counter = 1
-    while True:
-        existing_user = await db.execute(
-            select(User).where(User.username == username)
-        )
-        if not existing_user.scalar_one_or_none():
-            break
-        username = f"{base_username}_{counter}"
-        counter += 1
+    # Use clinic.id to make username unique from the start
+    username = f"{base_username}_{clinic.id}"
+    # Verify it doesn't exist (shouldn't, but check anyway)
+    existing_user_check = await db.execute(
+        select(User).where(User.username == username)
+    )
+    if existing_user_check.scalar_one_or_none():
+        # If by some chance it exists, append timestamp
+        import time
+        username = f"{base_username}_{clinic.id}_{int(time.time())}"
     
     # Generate email from clinic email or use default pattern
     # Use clinic email if available, otherwise generate from clinic name
     admin_email = clinic_data.email if clinic_data.email else f"admin@{clinic_name_slug}.com"
-    # Ensure email uniqueness
-    email_counter = 1
-    original_email = admin_email
-    while True:
-        existing_email = await db.execute(
-            select(User).where(User.email == admin_email)
-        )
-        if not existing_email.scalar_one_or_none():
-            break
-        # Extract domain and add counter
-        if "@" in original_email:
-            local, domain = original_email.split("@", 1)
-            admin_email = f"{local}{email_counter}@{domain}"
+    # Use clinic.id to make email unique from the start
+    if "@" in admin_email:
+        local, domain = admin_email.split("@", 1)
+        admin_email = f"{local}_{clinic.id}@{domain}"
+    else:
+        admin_email = f"admin_{clinic.id}@{clinic_name_slug}.com"
+    
+    # Verify email doesn't exist (shouldn't, but check anyway)
+    existing_email_check = await db.execute(
+        select(User).where(User.email == admin_email)
+    )
+    if existing_email_check.scalar_one_or_none():
+        # If by some chance it exists, append timestamp
+        import time
+        if "@" in admin_email:
+            local, domain = admin_email.split("@", 1)
+            admin_email = f"{local}_{int(time.time())}@{domain}"
         else:
-            admin_email = f"admin{email_counter}@{clinic_name_slug}.com"
-        email_counter += 1
+            admin_email = f"admin_{clinic.id}_{int(time.time())}@{clinic_name_slug}.com"
     
     # Generate secure random password for the clinic admin user (16 characters for better security)
     default_password = generate_secure_password(length=16)
@@ -759,110 +781,115 @@ async def create_clinic(
     await db.refresh(clinic)
     await db.refresh(admin_user)
     
-    # Send credentials email to clinic email (or admin email as fallback)
+    # Send credentials email in background (non-blocking)
     recipient_email = clinic.email or admin_email
-    logger.info(f"Attempting to send clinic admin credentials email. Recipient: {recipient_email}, Email service enabled: {email_service.is_enabled()}")
     if recipient_email:
-        try:
-            # Get the frontend URL from environment or use default
-            frontend_url = os.getenv("FRONTEND_URL", "https://prontivus-frontend-p2rr.vercel.app")
-            login_url = f"{frontend_url}/portal/login"
-            logger.info(f"Preparing email with login URL: {login_url}")
-            
-            # Professional HTML email with credentials
-            html_body = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ background-color: #0F4C75; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
-                    .content {{ background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; }}
-                    .credentials {{ background-color: white; padding: 20px; margin: 20px 0; border-left: 4px solid #0F4C75; }}
-                    .credential-item {{ margin: 10px 0; padding: 8px; background-color: #f5f5f5; border-radius: 3px; }}
-                    .credential-label {{ font-weight: bold; color: #0F4C75; }}
-                    .password {{ font-family: monospace; font-size: 14px; color: #d32f2f; background-color: #fff3cd; padding: 5px 10px; border-radius: 3px; }}
-                    .button {{ display: inline-block; padding: 12px 24px; background-color: #0F4C75; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
-                    .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
-                    .warning {{ background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        <h1>Bem-vindo ao Prontivus</h1>
-                    </div>
-                    <div class="content">
-                        <p>Olá,</p>
-                        <p>Sua clínica <strong>{clinic.name}</strong> foi cadastrada com sucesso no sistema Prontivus.</p>
-                        
-                        <p>Segue abaixo as credenciais do usuário administrador da clínica:</p>
-                        
-                        <div class="credentials">
-                            <div class="credential-item">
-                                <span class="credential-label">Usuário:</span> {username}
-                            </div>
-                            <div class="credential-item">
-                                <span class="credential-label">E-mail:</span> {admin_email}
-                            </div>
-                            <div class="credential-item">
-                                <span class="credential-label">Senha provisória:</span>
-                                <div class="password">{default_password}</div>
-                            </div>
+        # Create a background task to send email
+        async def send_clinic_admin_email():
+            try:
+                logger.info(f"Attempting to send clinic admin credentials email. Recipient: {recipient_email}, Email service enabled: {email_service.is_enabled()}")
+                # Get the frontend URL from environment or use default
+                frontend_url = os.getenv("FRONTEND_URL", "https://prontivus-frontend-p2rr.vercel.app")
+                login_url = f"{frontend_url}/portal/login"
+                logger.info(f"Preparing email with login URL: {login_url}")
+                
+                # Professional HTML email with credentials
+                html_body = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <style>
+                        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                        .header {{ background-color: #0F4C75; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
+                        .content {{ background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; }}
+                        .credentials {{ background-color: white; padding: 20px; margin: 20px 0; border-left: 4px solid #0F4C75; }}
+                        .credential-item {{ margin: 10px 0; padding: 8px; background-color: #f5f5f5; border-radius: 3px; }}
+                        .credential-label {{ font-weight: bold; color: #0F4C75; }}
+                        .password {{ font-family: monospace; font-size: 14px; color: #d32f2f; background-color: #fff3cd; padding: 5px 10px; border-radius: 3px; }}
+                        .button {{ display: inline-block; padding: 12px 24px; background-color: #0F4C75; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+                        .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+                        .warning {{ background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <div class="header">
+                            <h1>Bem-vindo ao Prontivus</h1>
                         </div>
-                        
-                        <div class="warning">
-                            <strong>⚠️ Importante:</strong> Por segurança, recomendamos fortemente que você altere esta senha no primeiro acesso ao sistema.
+                        <div class="content">
+                            <p>Olá,</p>
+                            <p>Sua clínica <strong>{clinic.name}</strong> foi cadastrada com sucesso no sistema Prontivus.</p>
+                            
+                            <p>Segue abaixo as credenciais do usuário administrador da clínica:</p>
+                            
+                            <div class="credentials">
+                                <div class="credential-item">
+                                    <span class="credential-label">Usuário:</span> {username}
+                                </div>
+                                <div class="credential-item">
+                                    <span class="credential-label">E-mail:</span> {admin_email}
+                                </div>
+                                <div class="credential-item">
+                                    <span class="credential-label">Senha provisória:</span>
+                                    <div class="password">{default_password}</div>
+                                </div>
+                            </div>
+                            
+                            <div class="warning">
+                                <strong>⚠️ Importante:</strong> Por segurança, recomendamos fortemente que você altere esta senha no primeiro acesso ao sistema.
+                            </div>
+                            
+                            <p style="text-align: center;">
+                                <a href="{login_url}" class="button">Acessar o Sistema</a>
+                            </p>
+                            
+                            <p>Ou copie e cole o seguinte link no seu navegador:</p>
+                            <p style="word-break: break-all; color: #0F4C75;">{login_url}</p>
                         </div>
-                        
-                        <p style="text-align: center;">
-                            <a href="{login_url}" class="button">Acessar o Sistema</a>
-                        </p>
-                        
-                        <p>Ou copie e cole o seguinte link no seu navegador:</p>
-                        <p style="word-break: break-all; color: #0F4C75;">{login_url}</p>
+                        <div class="footer">
+                            <p>Atenciosamente,<br/><strong>Equipe Prontivus</strong></p>
+                            <p style="margin-top: 20px; font-size: 11px; color: #999;">
+                                Este é um e-mail automático. Por favor, não responda a esta mensagem.
+                            </p>
+                        </div>
                     </div>
-                    <div class="footer">
-                        <p>Atenciosamente,<br/><strong>Equipe Prontivus</strong></p>
-                        <p style="margin-top: 20px; font-size: 11px; color: #999;">
-                            Este é um e-mail automático. Por favor, não responda a esta mensagem.
-                        </p>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            text_body = (
-                f"Bem-vindo ao Prontivus\n\n"
-                f"Olá,\n\n"
-                f"Sua clínica {clinic.name} foi cadastrada com sucesso no sistema Prontivus.\n\n"
-                f"CREDENCIAIS DO ADMINISTRADOR:\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Usuário: {username}\n"
-                f"E-mail: {admin_email}\n"
-                f"Senha provisória: {default_password}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"⚠️ IMPORTANTE: Por segurança, recomendamos fortemente que você altere esta senha no primeiro acesso ao sistema.\n\n"
-                f"Acesse o sistema em: {login_url}\n\n"
-                f"Atenciosamente,\nEquipe Prontivus\n\n"
-                f"---\n"
-                f"Este é um e-mail automático. Por favor, não responda a esta mensagem."
-            )
-            email_sent = await email_service.send_email(
-                to_email=recipient_email,
-                subject="Prontivus - Credenciais de Acesso do Administrador",
-                html_body=html_body,
-                text_body=text_body,
-            )
-            if email_sent:
-                logger.info(f"Clinic admin credentials email sent successfully to {recipient_email}")
-            else:
-                logger.warning(f"Failed to send clinic admin credentials email to {recipient_email} - email service returned False")
-        except Exception as e:
-            # Don't fail clinic creation if email sending fails, but log the error
-            logger.exception(f"Exception occurred while sending clinic admin credentials email to {recipient_email}: {str(e)}")
+                </body>
+                </html>
+                """
+                text_body = (
+                    f"Bem-vindo ao Prontivus\n\n"
+                    f"Olá,\n\n"
+                    f"Sua clínica {clinic.name} foi cadastrada com sucesso no sistema Prontivus.\n\n"
+                    f"CREDENCIAIS DO ADMINISTRADOR:\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Usuário: {username}\n"
+                    f"E-mail: {admin_email}\n"
+                    f"Senha provisória: {default_password}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"⚠️ IMPORTANTE: Por segurança, recomendamos fortemente que você altere esta senha no primeiro acesso ao sistema.\n\n"
+                    f"Acesse o sistema em: {login_url}\n\n"
+                    f"Atenciosamente,\nEquipe Prontivus\n\n"
+                    f"---\n"
+                    f"Este é um e-mail automático. Por favor, não responda a esta mensagem."
+                )
+                email_sent = await email_service.send_email(
+                    to_email=recipient_email,
+                    subject="Prontivus - Credenciais de Acesso do Administrador",
+                    html_body=html_body,
+                    text_body=text_body,
+                )
+                if email_sent:
+                    logger.info(f"Clinic admin credentials email sent successfully to {recipient_email}")
+                else:
+                    logger.warning(f"Failed to send clinic admin credentials email to {recipient_email} - email service returned False")
+            except Exception as e:
+                # Don't fail clinic creation if email sending fails, but log the error
+                logger.exception(f"Exception occurred while sending clinic admin credentials email to {recipient_email}: {str(e)}")
+        
+        background_tasks.add_task(send_clinic_admin_email)
+        logger.info(f"Email sending task added to background for clinic {clinic.id}")
     else:
         logger.warning(f"No recipient email available for clinic {clinic.id}. Clinic email: {clinic.email}, Admin email: {admin_email}")
     
@@ -1317,20 +1344,123 @@ async def delete_clinic(
         """, {"clinic_id": clinic_id}, "invoices.appointment_id")
         
         # 2. Delete invoice_lines (must be deleted before invoices)
-        await safe_delete_optional("""
-            DELETE il FROM invoice_lines il
-            INNER JOIN invoices i ON il.invoice_id = i.id
-            WHERE i.clinic_id = :clinic_id
-        """, {"clinic_id": clinic_id}, "invoice_lines")
+        # Handle case where invoices table may not have clinic_id column
+        try:
+            logger.info(f"Attempting to delete invoice_lines for clinic {clinic_id}")
+            # Try method 1: If invoices has clinic_id, use it directly
+            try:
+                await db.execute(text("""
+                    DELETE il FROM invoice_lines il
+                    INNER JOIN invoices i ON il.invoice_id = i.id
+                    WHERE i.clinic_id = :clinic_id
+                """), {"clinic_id": clinic_id})
+                logger.info(f"Successfully deleted invoice_lines using invoices.clinic_id")
+            except Exception as e1:
+                error_msg1 = str(e1).lower()
+                if "unknown column" in error_msg1 and "clinic_id" in error_msg1:
+                    # Method 1 failed, try method 2: Join through appointments
+                    logger.info(f"invoices.clinic_id doesn't exist, trying join through appointments")
+                    try:
+                        await db.execute(text("""
+                            DELETE il FROM invoice_lines il
+                            INNER JOIN invoices i ON il.invoice_id = i.id
+                            INNER JOIN appointments a ON i.appointment_id = a.id
+                            WHERE a.clinic_id = :clinic_id
+                        """), {"clinic_id": clinic_id})
+                        logger.info(f"Successfully deleted invoice_lines using appointments.clinic_id")
+                    except Exception as e2:
+                        error_msg2 = str(e2).lower()
+                        if "unknown column" in error_msg2 or "null" in error_msg2:
+                            # Method 2 failed, try method 3: Join through patients
+                            logger.info(f"Join through appointments failed, trying join through patients")
+                            await db.execute(text("""
+                                DELETE il FROM invoice_lines il
+                                INNER JOIN invoices i ON il.invoice_id = i.id
+                                INNER JOIN patients pt ON i.patient_id = pt.id
+                                WHERE pt.clinic_id = :clinic_id
+                            """), {"clinic_id": clinic_id})
+                            logger.info(f"Successfully deleted invoice_lines using patients.clinic_id")
+                        else:
+                            raise
+                else:
+                    raise
+        except Exception as e:
+            error_msg = str(e).lower()
+            logger.warning(f"Error deleting invoice_lines: {error_msg}")
+            # If table doesn't exist or column doesn't exist, just skip (don't exit function)
+            if ("does not exist" in error_msg or "undefinedtable" in error_msg or 
+                "table" in error_msg and "doesn't exist" in error_msg or
+                "unknown table" in error_msg or "unknown column" in error_msg):
+                logger.info(f"invoice_lines deletion skipped due to schema mismatch or missing table")
+                try:
+                    await db.rollback()
+                    await db.execute(text("SELECT 1"))
+                except Exception as rollback_error:
+                    logger.warning(f"Error during rollback/restart: {rollback_error}")
+                # Continue to next deletion instead of returning
+            else:
+                # For other errors, re-raise
+                await db.rollback()
+                raise
         
         # 3. Delete payments (may reference users and invoices)
         # Must be deleted before invoices to avoid foreign key issues
         # Delete payments linked to invoices from this clinic
-        await safe_delete("""
-            DELETE p FROM payments p
-            INNER JOIN invoices i ON p.invoice_id = i.id
-            WHERE i.clinic_id = :clinic_id
-        """, {"clinic_id": clinic_id}, "payments (by invoice)")
+        # Note: invoices may not have clinic_id directly, so we join through appointments or patients
+        try:
+            logger.info(f"Attempting to delete payments linked to invoices for clinic {clinic_id}")
+            # Try method 1: If invoices has clinic_id, use it directly
+            try:
+                await db.execute(text("""
+                    DELETE p FROM payments p
+                    INNER JOIN invoices i ON p.invoice_id = i.id
+                    WHERE i.clinic_id = :clinic_id
+                """), {"clinic_id": clinic_id})
+                logger.info(f"Successfully deleted payments using invoices.clinic_id")
+            except Exception as e1:
+                error_msg1 = str(e1).lower()
+                if "unknown column" in error_msg1 and "clinic_id" in error_msg1:
+                    # Method 1 failed, try method 2: Join through appointments
+                    logger.info(f"invoices.clinic_id doesn't exist, trying join through appointments")
+                    try:
+                        await db.execute(text("""
+                            DELETE p FROM payments p
+                            INNER JOIN invoices i ON p.invoice_id = i.id
+                            INNER JOIN appointments a ON i.appointment_id = a.id
+                            WHERE a.clinic_id = :clinic_id
+                        """), {"clinic_id": clinic_id})
+                        logger.info(f"Successfully deleted payments using appointments.clinic_id")
+                    except Exception as e2:
+                        error_msg2 = str(e2).lower()
+                        if "unknown column" in error_msg2 or "null" in error_msg2:
+                            # Method 2 failed, try method 3: Join through patients
+                            logger.info(f"Join through appointments failed, trying join through patients")
+                            await db.execute(text("""
+                                DELETE p FROM payments p
+                                INNER JOIN invoices i ON p.invoice_id = i.id
+                                INNER JOIN patients pt ON i.patient_id = pt.id
+                                WHERE pt.clinic_id = :clinic_id
+                            """), {"clinic_id": clinic_id})
+                            logger.info(f"Successfully deleted payments using patients.clinic_id")
+                        else:
+                            raise
+                else:
+                    raise
+        except Exception as e:
+            error_msg = str(e).lower()
+            logger.warning(f"Error deleting payments by invoice: {error_msg}")
+            # If it's an "unknown column" error, just skip (table might have different schema)
+            if "unknown column" in error_msg:
+                logger.info(f"Payments deletion skipped due to schema mismatch")
+                try:
+                    await db.rollback()
+                    await db.execute(text("SELECT 1"))
+                except Exception as rollback_error:
+                    logger.warning(f"Error during rollback/restart: {rollback_error}")
+            else:
+                # For other errors, re-raise
+                await db.rollback()
+                raise
         
         # Delete payments created by users from this clinic
         await safe_delete("""
@@ -1341,10 +1471,49 @@ async def delete_clinic(
         
         # 4. Delete invoices (must be deleted before appointments since invoices reference appointments)
         # Note: We already cleared appointment_id references above, so this should be safe
+        # Handle case where invoices table may not have clinic_id column
         try:
             logger.info(f"Attempting to delete invoices for clinic {clinic_id}")
-            await db.execute(text("DELETE FROM invoices WHERE clinic_id = :clinic_id"), {"clinic_id": clinic_id})
-            logger.info(f"Successfully deleted invoices for clinic {clinic_id}")
+            # Try method 1: If invoices has clinic_id, use it directly
+            try:
+                await db.execute(text("DELETE FROM invoices WHERE clinic_id = :clinic_id"), {"clinic_id": clinic_id})
+                logger.info(f"Successfully deleted invoices using clinic_id")
+            except Exception as e1:
+                error_msg1 = str(e1).lower()
+                if "unknown column" in error_msg1 and "clinic_id" in error_msg1:
+                    # Method 1 failed, try method 2: Join through appointments
+                    logger.info(f"invoices.clinic_id doesn't exist, trying join through appointments")
+                    try:
+                        await db.execute(text("""
+                            DELETE i FROM invoices i
+                            INNER JOIN appointments a ON i.appointment_id = a.id
+                            WHERE a.clinic_id = :clinic_id
+                        """), {"clinic_id": clinic_id})
+                        logger.info(f"Successfully deleted invoices using appointments.clinic_id")
+                    except Exception as e2:
+                        error_msg2 = str(e2).lower()
+                        if "unknown column" in error_msg2 or "null" in error_msg2:
+                            # Method 2 failed, try method 3: Join through patients
+                            logger.info(f"Join through appointments failed, trying join through patients")
+                            await db.execute(text("""
+                                DELETE i FROM invoices i
+                                INNER JOIN patients pt ON i.patient_id = pt.id
+                                WHERE pt.clinic_id = :clinic_id
+                            """), {"clinic_id": clinic_id})
+                            logger.info(f"Successfully deleted invoices using patients.clinic_id")
+                        else:
+                            raise
+                else:
+                    # For other errors (foreign key, constraint), re-raise
+                    if "foreign key" in error_msg1 or "constraint" in error_msg1:
+                        await db.rollback()
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"Erro ao deletar invoices: {str(e1)}"
+                        )
+                    raise
+        except HTTPException:
+            raise
         except Exception as e:
             error_msg = str(e).lower()
             logger.error(f"Error deleting invoices: {error_msg}")
@@ -1400,7 +1569,7 @@ async def delete_clinic(
             await db.commit()
             logger.info(f"Successfully deleted clinic {clinic_id} (name: {clinic_name})")
             
-            # Log the deletion
+            # Log the deletion (optional - table might not exist)
             try:
                 system_log = SystemLog(
                     level="info",
@@ -1411,7 +1580,23 @@ async def delete_clinic(
                 db.add(system_log)
                 await db.commit()
             except Exception as log_error:
+                error_msg = str(log_error).lower()
                 logger.warning(f"Failed to create system log for clinic deletion: {log_error}")
+                # If table doesn't exist, rollback and restart transaction to clear session state
+                if "does not exist" in error_msg or "table" in error_msg and "doesn't exist" in error_msg:
+                    try:
+                        await db.rollback()
+                        # Restart transaction by executing a simple query
+                        await db.execute(text("SELECT 1"))
+                    except Exception as rollback_error:
+                        logger.warning(f"Error during rollback/restart after system log failure: {rollback_error}")
+                # For other errors, also rollback to clear session state
+                else:
+                    try:
+                        await db.rollback()
+                        await db.execute(text("SELECT 1"))
+                    except Exception as rollback_error:
+                        logger.warning(f"Error during rollback/restart after system log failure: {rollback_error}")
         except Exception as delete_error:
             await db.rollback()
             error_msg = str(delete_error)

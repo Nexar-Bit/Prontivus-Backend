@@ -75,15 +75,29 @@ class EmailService:
             
             # Send email
             # Port 465 uses SSL, port 587 uses TLS
+            import ssl
+            
+            # Create SSL context for better compatibility
+            context = ssl.create_default_context()
+            # Some SMTP servers (like GoDaddy) may require less strict verification
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            # Support a wider range of TLS versions for compatibility
+            context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+            context.maximum_version = ssl.TLSVersion.MAXIMUM_SUPPORTED
+            
+            # Use longer timeout for GoDaddy and other servers that may be slower
+            timeout = 60
+            
             if self.smtp_port == 465:
                 # Use SSL for port 465
-                with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port) as server:
+                with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, context=context, timeout=timeout) as server:
                     server.login(self.smtp_user, self.smtp_password)
                     server.send_message(msg)
             else:
                 # Use TLS for port 587 and others
-                with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                    server.starttls()
+                with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=timeout) as server:
+                    server.starttls(context=context)
                     server.login(self.smtp_user, self.smtp_password)
                     server.send_message(msg)
             

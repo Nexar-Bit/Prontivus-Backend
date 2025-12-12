@@ -249,7 +249,7 @@ async def list_notifications(
         
         result = {"data": notifications}
         # Cache the result for 30 seconds
-        analytics_cache.set(cache_key, result, ttl=30)
+        analytics_cache.set(cache_key, result, ttl_seconds=30)
         return result
         
     except Exception as e:

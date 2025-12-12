@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any
 import traceback
 import logging
 import re
+import asyncio
 
 from fastapi import APIRouter, Depends, Query, Response, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,18 +61,19 @@ async def get_dashboard_stats(
         last_month_start = (this_month_start - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         last_month_end = this_month_start - timedelta(seconds=1)
         
-        # Total active patients (only count active patients)
+        # Calculate end of current month
+        if now.month == 12:
+            next_month_start = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            next_month_start = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Run all queries in parallel for better performance
         total_patients_query = select(func.count(Patient.id)).filter(
             and_(
                 Patient.clinic_id == current_user.clinic_id,
                 Patient.is_active == True
             )
         )
-        total_patients_result = await db.execute(total_patients_query)
-        total_patients = total_patients_result.scalar() or 0
-        logger.info(f"Total active patients for clinic {current_user.clinic_id}: {total_patients}")
-        
-        # Patients last month (for change calculation) - only active patients
         patients_last_month_query = select(func.count(Patient.id)).filter(
             and_(
                 Patient.clinic_id == current_user.clinic_id,
@@ -80,21 +82,6 @@ async def get_dashboard_stats(
                 Patient.created_at <= last_month_end,
             )
         )
-        patients_last_month_result = await db.execute(patients_last_month_query)
-        patients_last_month = patients_last_month_result.scalar() or 0
-        
-        # Calculate patient change percentage
-        patients_change = 0.0
-        if patients_last_month > 0:
-            patients_change = ((total_patients - patients_last_month) / patients_last_month) * 100
-        
-        # Appointments this month (scheduled in current month)
-        # Calculate end of current month
-        if now.month == 12:
-            next_month_start = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-        else:
-            next_month_start = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
-        
         appointments_this_month_query = select(func.count(Appointment.id)).filter(
             and_(
                 Appointment.clinic_id == current_user.clinic_id,
@@ -102,11 +89,6 @@ async def get_dashboard_stats(
                 Appointment.scheduled_datetime < next_month_start,
             )
         )
-        appointments_this_month_result = await db.execute(appointments_this_month_query)
-        appointments_this_month = appointments_this_month_result.scalar() or 0
-        logger.info(f"Appointments this month for clinic {current_user.clinic_id}: {appointments_this_month}")
-        
-        # Appointments last month
         appointments_last_month_query = select(func.count(Appointment.id)).filter(
             and_(
                 Appointment.clinic_id == current_user.clinic_id,
@@ -114,15 +96,6 @@ async def get_dashboard_stats(
                 Appointment.scheduled_datetime <= last_month_end,
             )
         )
-        appointments_last_month_result = await db.execute(appointments_last_month_query)
-        appointments_last_month = appointments_last_month_result.scalar() or 0
-        
-        # Calculate appointment change percentage
-        appointments_change = 0.0
-        if appointments_last_month > 0:
-            appointments_change = ((appointments_this_month - appointments_last_month) / appointments_last_month) * 100
-        
-        # Today's appointments
         today_appointments_query = select(func.count(Appointment.id)).filter(
             and_(
                 Appointment.clinic_id == current_user.clinic_id,
@@ -130,40 +103,6 @@ async def get_dashboard_stats(
                 Appointment.scheduled_datetime < today_start + timedelta(days=1),
             )
         )
-        today_appointments_result = await db.execute(today_appointments_query)
-        today_appointments = today_appointments_result.scalar() or 0
-        
-        # Revenue this month
-        revenue_this_month_query = select(func.coalesce(func.sum(Invoice.total_amount), 0)).filter(
-            and_(
-                Invoice.clinic_id == current_user.clinic_id,
-                Invoice.issue_date >= this_month_start,
-                Invoice.status != InvoiceStatus.CANCELLED,
-            )
-        )
-        revenue_this_month_result = await db.execute(revenue_this_month_query)
-        revenue_this_month = float(revenue_this_month_result.scalar() or 0)
-        
-        # Revenue last month
-        revenue_last_month_query = select(func.coalesce(func.sum(Invoice.total_amount), 0)).filter(
-            and_(
-                Invoice.clinic_id == current_user.clinic_id,
-                Invoice.issue_date >= last_month_start,
-                Invoice.issue_date <= last_month_end,
-                Invoice.status != InvoiceStatus.CANCELLED,
-            )
-        )
-        revenue_last_month_result = await db.execute(revenue_last_month_query)
-        revenue_last_month = float(revenue_last_month_result.scalar() or 0)
-        
-        # Calculate revenue change percentage
-        revenue_change = 0.0
-        if revenue_last_month > 0:
-            revenue_change = ((revenue_this_month - revenue_last_month) / revenue_last_month) * 100
-        
-        # Pending results (appointments completed but no clinical record or pending exams)
-        # For now, we'll use appointments that are completed but might have pending lab results
-        # This is a simplified version - can be enhanced based on actual exam/result models
         pending_results_query = select(func.count(Appointment.id)).filter(
             and_(
                 Appointment.clinic_id == current_user.clinic_id,
@@ -171,8 +110,153 @@ async def get_dashboard_stats(
                 Appointment.completed_at.isnot(None),
             )
         )
-        pending_results_result = await db.execute(pending_results_query)
-        pending_results = pending_results_result.scalar() or 0
+        
+        # Execute all queries in parallel
+        (
+            total_patients_result,
+            patients_last_month_result,
+            appointments_this_month_result,
+            appointments_last_month_result,
+            today_appointments_result,
+            pending_results_result,
+        ) = await asyncio.gather(
+            db.execute(total_patients_query),
+            db.execute(patients_last_month_query),
+            db.execute(appointments_this_month_query),
+            db.execute(appointments_last_month_query),
+            db.execute(today_appointments_query),
+            db.execute(pending_results_query),
+            return_exceptions=True
+        )
+        
+        # Extract results (handle exceptions)
+        total_patients = total_patients_result.scalar() or 0 if not isinstance(total_patients_result, Exception) else 0
+        patients_last_month = patients_last_month_result.scalar() or 0 if not isinstance(patients_last_month_result, Exception) else 0
+        appointments_this_month = appointments_this_month_result.scalar() or 0 if not isinstance(appointments_this_month_result, Exception) else 0
+        appointments_last_month = appointments_last_month_result.scalar() or 0 if not isinstance(appointments_last_month_result, Exception) else 0
+        today_appointments = today_appointments_result.scalar() or 0 if not isinstance(today_appointments_result, Exception) else 0
+        pending_results = pending_results_result.scalar() or 0 if not isinstance(pending_results_result, Exception) else 0
+        
+        logger.info(f"Total active patients for clinic {current_user.clinic_id}: {total_patients}")
+        logger.info(f"Appointments this month for clinic {current_user.clinic_id}: {appointments_this_month}")
+        
+        # Calculate patient change percentage
+        patients_change = 0.0
+        if patients_last_month > 0:
+            patients_change = ((total_patients - patients_last_month) / patients_last_month) * 100
+        
+        # Calculate appointment change percentage
+        appointments_change = 0.0
+        if appointments_last_month > 0:
+            appointments_change = ((appointments_this_month - appointments_last_month) / appointments_last_month) * 100
+        
+        # Revenue this month - handle case where invoices table may not have clinic_id
+        revenue_this_month = 0.0
+        revenue_last_month = 0.0
+        try:
+            # Try direct clinic_id first
+            revenue_this_month_query = select(func.coalesce(func.sum(Invoice.total_amount), 0)).filter(
+                and_(
+                    Invoice.clinic_id == current_user.clinic_id,
+                    Invoice.issue_date >= this_month_start,
+                    Invoice.status != InvoiceStatus.CANCELLED,
+                )
+            )
+            revenue_this_month_result = await db.execute(revenue_this_month_query)
+            revenue_this_month = float(revenue_this_month_result.scalar() or 0)
+            
+            # Revenue last month
+            revenue_last_month_query = select(func.coalesce(func.sum(Invoice.total_amount), 0)).filter(
+                and_(
+                    Invoice.clinic_id == current_user.clinic_id,
+                    Invoice.issue_date >= last_month_start,
+                    Invoice.issue_date <= last_month_end,
+                    Invoice.status != InvoiceStatus.CANCELLED,
+                )
+            )
+            revenue_last_month_result = await db.execute(revenue_last_month_query)
+            revenue_last_month = float(revenue_last_month_result.scalar() or 0)
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "unknown column" in error_msg and "clinic_id" in error_msg:
+                # If invoices doesn't have clinic_id, try joining through appointments or patients
+                logger.warning(f"Invoices table doesn't have clinic_id, trying alternative approach")
+                try:
+                    # Try through appointments
+                    from sqlalchemy import text
+                    revenue_this_month_query = text("""
+                        SELECT COALESCE(SUM(i.total_amount), 0) 
+                        FROM invoices i
+                        INNER JOIN appointments a ON i.appointment_id = a.id
+                        WHERE a.clinic_id = :clinic_id
+                          AND i.issue_date >= :start_date
+                          AND i.status != 'CANCELLED'
+                    """)
+                    result = await db.execute(revenue_this_month_query, {
+                        "clinic_id": current_user.clinic_id,
+                        "start_date": this_month_start
+                    })
+                    revenue_this_month = float(result.scalar() or 0)
+                    
+                    revenue_last_month_query = text("""
+                        SELECT COALESCE(SUM(i.total_amount), 0) 
+                        FROM invoices i
+                        INNER JOIN appointments a ON i.appointment_id = a.id
+                        WHERE a.clinic_id = :clinic_id
+                          AND i.issue_date >= :start_date
+                          AND i.issue_date <= :end_date
+                          AND i.status != 'CANCELLED'
+                    """)
+                    result = await db.execute(revenue_last_month_query, {
+                        "clinic_id": current_user.clinic_id,
+                        "start_date": last_month_start,
+                        "end_date": last_month_end
+                    })
+                    revenue_last_month = float(result.scalar() or 0)
+                except Exception as e2:
+                    logger.warning(f"Could not calculate revenue through appointments: {e2}")
+                    # If that fails, try through patients
+                    try:
+                        revenue_this_month_query = text("""
+                            SELECT COALESCE(SUM(i.total_amount), 0) 
+                            FROM invoices i
+                            INNER JOIN patients p ON i.patient_id = p.id
+                            WHERE p.clinic_id = :clinic_id
+                              AND i.issue_date >= :start_date
+                              AND i.status != 'CANCELLED'
+                        """)
+                        result = await db.execute(revenue_this_month_query, {
+                            "clinic_id": current_user.clinic_id,
+                            "start_date": this_month_start
+                        })
+                        revenue_this_month = float(result.scalar() or 0)
+                        
+                        revenue_last_month_query = text("""
+                            SELECT COALESCE(SUM(i.total_amount), 0) 
+                            FROM invoices i
+                            INNER JOIN patients p ON i.patient_id = p.id
+                            WHERE p.clinic_id = :clinic_id
+                              AND i.issue_date >= :start_date
+                              AND i.issue_date <= :end_date
+                              AND i.status != 'CANCELLED'
+                        """)
+                        result = await db.execute(revenue_last_month_query, {
+                            "clinic_id": current_user.clinic_id,
+                            "start_date": last_month_start,
+                            "end_date": last_month_end
+                        })
+                        revenue_last_month = float(result.scalar() or 0)
+                    except Exception as e3:
+                        logger.warning(f"Could not calculate revenue through patients: {e3}")
+                        # If all methods fail, revenue will remain 0.0
+            else:
+                # For other errors, log but don't fail the entire request
+                logger.warning(f"Error calculating revenue: {e}")
+        
+        # Calculate revenue change percentage
+        revenue_change = 0.0
+        if revenue_last_month > 0:
+            revenue_change = ((revenue_this_month - revenue_last_month) / revenue_last_month) * 100
         
         # Calculate satisfaction score from feedback/ratings if available
         # For now, if there's no feedback system, return 0 to indicate no data

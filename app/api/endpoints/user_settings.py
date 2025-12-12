@@ -91,7 +91,7 @@ async def get_user_settings(
             security=defaults["security"],
         )
         # Cache the result for 2 minutes
-        analytics_cache.set(cache_key, result.model_dump(), ttl=120)
+        analytics_cache.set(cache_key, result.model_dump(), ttl_seconds=120)
         return result
     
     # Return settings with profile info
@@ -111,7 +111,7 @@ async def get_user_settings(
         security=user_settings.security if user_settings.security is not None else defaults["security"],
     )
     # Cache the result for 2 minutes
-    analytics_cache.set(cache_key, result.model_dump(), ttl=120)
+    analytics_cache.set(cache_key, result.model_dump(), ttl_seconds=120)
     return result
 
 
