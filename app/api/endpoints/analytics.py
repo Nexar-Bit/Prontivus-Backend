@@ -45,6 +45,7 @@ async def get_dashboard_stats(
     Get dashboard statistics for the current user's clinic.
     Returns metrics for patients, appointments, revenue, and other key indicators.
     Uses caching to improve performance.
+    Returns defaults immediately if queries timeout (within 10 seconds).
     """
     try:
         # Check cache first (5 minute TTL)
@@ -111,23 +112,43 @@ async def get_dashboard_stats(
             )
         )
         
-        # Execute all queries in parallel
-        (
-            total_patients_result,
-            patients_last_month_result,
-            appointments_this_month_result,
-            appointments_last_month_result,
-            today_appointments_result,
-            pending_results_result,
-        ) = await asyncio.gather(
-            db.execute(total_patients_query),
-            db.execute(patients_last_month_query),
-            db.execute(appointments_this_month_query),
-            db.execute(appointments_last_month_query),
-            db.execute(today_appointments_query),
-            db.execute(pending_results_query),
-            return_exceptions=True
-        )
+        # Execute all queries in parallel with aggressive timeout to prevent hanging
+        # Reduced to 10 seconds - if queries take longer, return defaults immediately
+        try:
+            (
+                total_patients_result,
+                patients_last_month_result,
+                appointments_this_month_result,
+                appointments_last_month_result,
+                today_appointments_result,
+                pending_results_result,
+            ) = await asyncio.wait_for(
+                asyncio.gather(
+                    db.execute(total_patients_query),
+                    db.execute(patients_last_month_query),
+                    db.execute(appointments_this_month_query),
+                    db.execute(appointments_last_month_query),
+                    db.execute(today_appointments_query),
+                    db.execute(pending_results_query),
+                    return_exceptions=True
+                ),
+                timeout=5.0  # 5 second timeout - fail fast to prevent frontend timeouts (2s auth + 5s queries = ~7s total)
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Dashboard stats queries timed out for clinic {current_user.clinic_id}, returning defaults")
+            # Return default values immediately if queries timeout
+            # Cache the defaults for 30 seconds to prevent repeated timeouts
+            default_result = {
+                "patients": {"value": 0, "change": 0.0},
+                "appointments": {"value": 0, "change": 0.0},
+                "revenue": {"value": 0.0, "change": 0.0},
+                "satisfaction": {"value": 0.0, "change": 0.0},
+                "today_appointments": {"value": 0, "change": 0.0},
+                "pending_results": {"value": 0, "change": 0.0},
+            }
+            # Cache defaults for 30 seconds to prevent repeated timeouts
+            analytics_cache.set(cache_key, default_result, ttl_seconds=30)
+            return default_result
         
         # Extract results (handle exceptions)
         total_patients = total_patients_result.scalar() or 0 if not isinstance(total_patients_result, Exception) else 0
@@ -150,108 +171,116 @@ async def get_dashboard_stats(
         if appointments_last_month > 0:
             appointments_change = ((appointments_this_month - appointments_last_month) / appointments_last_month) * 100
         
-        # Revenue this month - handle case where invoices table may not have clinic_id
-        revenue_this_month = 0.0
-        revenue_last_month = 0.0
-        try:
-            # Try direct clinic_id first
-            revenue_this_month_query = select(func.coalesce(func.sum(Invoice.total_amount), 0)).filter(
-                and_(
-                    Invoice.clinic_id == current_user.clinic_id,
-                    Invoice.issue_date >= this_month_start,
-                    Invoice.status != InvoiceStatus.CANCELLED,
-                )
-            )
-            revenue_this_month_result = await db.execute(revenue_this_month_query)
-            revenue_this_month = float(revenue_this_month_result.scalar() or 0)
+        # Revenue calculation with timeout to prevent hanging
+        async def calculate_revenue_with_timeout():
+            """Calculate revenue with a timeout to prevent blocking"""
+            rev_this_month = 0.0
+            rev_last_month = 0.0
             
-            # Revenue last month
-            revenue_last_month_query = select(func.coalesce(func.sum(Invoice.total_amount), 0)).filter(
-                and_(
-                    Invoice.clinic_id == current_user.clinic_id,
-                    Invoice.issue_date >= last_month_start,
-                    Invoice.issue_date <= last_month_end,
-                    Invoice.status != InvoiceStatus.CANCELLED,
+            try:
+                # Try direct clinic_id first
+                revenue_this_month_query = select(func.coalesce(func.sum(Invoice.total_amount), 0)).filter(
+                    and_(
+                        Invoice.clinic_id == current_user.clinic_id,
+                        Invoice.issue_date >= this_month_start,
+                        Invoice.status != InvoiceStatus.CANCELLED,
+                    )
                 )
-            )
-            revenue_last_month_result = await db.execute(revenue_last_month_query)
-            revenue_last_month = float(revenue_last_month_result.scalar() or 0)
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "unknown column" in error_msg and "clinic_id" in error_msg:
-                # If invoices doesn't have clinic_id, try joining through appointments or patients
-                logger.warning(f"Invoices table doesn't have clinic_id, trying alternative approach")
-                try:
-                    # Try through appointments
-                    from sqlalchemy import text
-                    revenue_this_month_query = text("""
-                        SELECT COALESCE(SUM(i.total_amount), 0) 
-                        FROM invoices i
-                        INNER JOIN appointments a ON i.appointment_id = a.id
-                        WHERE a.clinic_id = :clinic_id
-                          AND i.issue_date >= :start_date
-                          AND i.status != 'CANCELLED'
-                    """)
-                    result = await db.execute(revenue_this_month_query, {
-                        "clinic_id": current_user.clinic_id,
-                        "start_date": this_month_start
-                    })
-                    revenue_this_month = float(result.scalar() or 0)
+                revenue_last_month_query = select(func.coalesce(func.sum(Invoice.total_amount), 0)).filter(
+                    and_(
+                        Invoice.clinic_id == current_user.clinic_id,
+                        Invoice.issue_date >= last_month_start,
+                        Invoice.issue_date <= last_month_end,
+                        Invoice.status != InvoiceStatus.CANCELLED,
+                    )
+                )
+                
+                # Execute both revenue queries in parallel
+                revenue_results = await asyncio.gather(
+                    db.execute(revenue_this_month_query),
+                    db.execute(revenue_last_month_query),
+                    return_exceptions=True
+                )
+                
+                revenue_this_month_result, revenue_last_month_result = revenue_results
+                
+                if not isinstance(revenue_this_month_result, Exception):
+                    rev_this_month = float(revenue_this_month_result.scalar() or 0)
+                if not isinstance(revenue_last_month_result, Exception):
+                    rev_last_month = float(revenue_last_month_result.scalar() or 0)
                     
-                    revenue_last_month_query = text("""
-                        SELECT COALESCE(SUM(i.total_amount), 0) 
-                        FROM invoices i
-                        INNER JOIN appointments a ON i.appointment_id = a.id
-                        WHERE a.clinic_id = :clinic_id
-                          AND i.issue_date >= :start_date
-                          AND i.issue_date <= :end_date
-                          AND i.status != 'CANCELLED'
-                    """)
-                    result = await db.execute(revenue_last_month_query, {
-                        "clinic_id": current_user.clinic_id,
-                        "start_date": last_month_start,
-                        "end_date": last_month_end
-                    })
-                    revenue_last_month = float(result.scalar() or 0)
-                except Exception as e2:
-                    logger.warning(f"Could not calculate revenue through appointments: {e2}")
-                    # If that fails, try through patients
+                return rev_this_month, rev_last_month
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "unknown column" in error_msg and "clinic_id" in error_msg:
+                    # If invoices doesn't have clinic_id, try joining through appointments
+                    logger.warning(f"Invoices table doesn't have clinic_id, trying alternative approach")
+                    from sqlalchemy import text
                     try:
+                        # Try through appointments (most common case)
                         revenue_this_month_query = text("""
                             SELECT COALESCE(SUM(i.total_amount), 0) 
                             FROM invoices i
-                            INNER JOIN patients p ON i.patient_id = p.id
-                            WHERE p.clinic_id = :clinic_id
+                            INNER JOIN appointments a ON i.appointment_id = a.id
+                            WHERE a.clinic_id = :clinic_id
                               AND i.issue_date >= :start_date
                               AND i.status != 'CANCELLED'
                         """)
-                        result = await db.execute(revenue_this_month_query, {
-                            "clinic_id": current_user.clinic_id,
-                            "start_date": this_month_start
-                        })
-                        revenue_this_month = float(result.scalar() or 0)
-                        
                         revenue_last_month_query = text("""
                             SELECT COALESCE(SUM(i.total_amount), 0) 
                             FROM invoices i
-                            INNER JOIN patients p ON i.patient_id = p.id
-                            WHERE p.clinic_id = :clinic_id
+                            INNER JOIN appointments a ON i.appointment_id = a.id
+                            WHERE a.clinic_id = :clinic_id
                               AND i.issue_date >= :start_date
                               AND i.issue_date <= :end_date
                               AND i.status != 'CANCELLED'
                         """)
-                        result = await db.execute(revenue_last_month_query, {
-                            "clinic_id": current_user.clinic_id,
-                            "start_date": last_month_start,
-                            "end_date": last_month_end
-                        })
-                        revenue_last_month = float(result.scalar() or 0)
-                    except Exception as e3:
-                        logger.warning(f"Could not calculate revenue through patients: {e3}")
-                        # If all methods fail, revenue will remain 0.0
-            else:
-                # For other errors, log but don't fail the entire request
-                logger.warning(f"Error calculating revenue: {e}")
+                        
+                        # Execute both in parallel
+                        revenue_results = await asyncio.gather(
+                            db.execute(revenue_this_month_query, {
+                                "clinic_id": current_user.clinic_id,
+                                "start_date": this_month_start
+                            }),
+                            db.execute(revenue_last_month_query, {
+                                "clinic_id": current_user.clinic_id,
+                                "start_date": last_month_start,
+                                "end_date": last_month_end
+                            }),
+                            return_exceptions=True
+                        )
+                        
+                        revenue_this_month_result, revenue_last_month_result = revenue_results
+                        
+                        if not isinstance(revenue_this_month_result, Exception):
+                            rev_this_month = float(revenue_this_month_result.scalar() or 0)
+                        if not isinstance(revenue_last_month_result, Exception):
+                            rev_last_month = float(revenue_last_month_result.scalar() or 0)
+                            
+                        return rev_this_month, rev_last_month
+                    except Exception as e2:
+                        logger.warning(f"Could not calculate revenue through appointments: {e2}")
+                        # If that fails, return zeros - don't try patients join as it's slower
+                        return 0.0, 0.0
+                else:
+                    # For other errors, log but return zeros
+                    logger.warning(f"Error calculating revenue: {e}")
+                    return 0.0, 0.0
+        
+        # Calculate revenue with 5 second timeout (fail fast)
+        try:
+            revenue_this_month, revenue_last_month = await asyncio.wait_for(
+                calculate_revenue_with_timeout(),
+                timeout=5.0  # Reduced to 5 seconds - fail fast
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Revenue calculation timed out for clinic {current_user.clinic_id}, using defaults")
+            revenue_this_month = 0.0
+            revenue_last_month = 0.0
+        except Exception as e:
+            logger.warning(f"Error in revenue calculation: {e}, using defaults")
+            revenue_this_month = 0.0
+            revenue_last_month = 0.0
         
         # Calculate revenue change percentage
         revenue_change = 0.0
@@ -304,16 +333,34 @@ async def get_dashboard_stats(
         return result
     except SQLAlchemyError as e:
         logger.error(f"Database error in dashboard stats: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Database error: {str(e)}"
-        )
+        # Return defaults instead of raising exception for faster response
+        cache_key = f"dashboard_stats:clinic_{current_user.clinic_id}"
+        default_result = {
+            "patients": {"value": 0, "change": 0.0},
+            "appointments": {"value": 0, "change": 0.0},
+            "revenue": {"value": 0.0, "change": 0.0},
+            "satisfaction": {"value": 0.0, "change": 0.0},
+            "today_appointments": {"value": 0, "change": 0.0},
+            "pending_results": {"value": 0, "change": 0.0},
+        }
+        # Cache defaults for 30 seconds to prevent repeated errors
+        analytics_cache.set(cache_key, default_result, ttl_seconds=30)
+        return default_result
     except Exception as e:
         logger.error(f"Unexpected error in dashboard stats: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error generating dashboard stats: {str(e)}"
-        )
+        # Return defaults instead of raising exception for faster response
+        cache_key = f"dashboard_stats:clinic_{current_user.clinic_id}"
+        default_result = {
+            "patients": {"value": 0, "change": 0.0},
+            "appointments": {"value": 0, "change": 0.0},
+            "revenue": {"value": 0.0, "change": 0.0},
+            "satisfaction": {"value": 0.0, "change": 0.0},
+            "today_appointments": {"value": 0, "change": 0.0},
+            "pending_results": {"value": 0, "change": 0.0},
+        }
+        # Cache defaults for 30 seconds to prevent repeated errors
+        analytics_cache.set(cache_key, default_result, ttl_seconds=30)
+        return default_result
 
 
 

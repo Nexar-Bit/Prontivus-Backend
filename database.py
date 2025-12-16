@@ -9,9 +9,10 @@ load_dotenv()
 
 # Get database URL from environment variable
 # CRITICAL: Never hardcode production credentials. Always use environment variables.
+# Default now targets PostgreSQL with asyncpg for local development
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "mysql+aiomysql://user:password@localhost:3306/prontivus_clinic"  # Default for local development only
+    "postgresql+asyncpg://postgres:password@localhost:5432/prontivus_clinic"  # Default for local development only
 )
 
 # Create async engine
@@ -21,16 +22,28 @@ DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 ECHO_SQL = (ENVIRONMENT == "development" and DEBUG)
 
 # Connection pool configuration to prevent connection exhaustion
-# These settings help prevent intermittent connection failures
-POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))  # Number of connections to maintain
-MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "20"))  # Additional connections beyond pool_size
-POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "30"))  # Seconds to wait for a connection
-POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "3600"))  # Recycle connections after 1 hour
+# These settings help prevent intermittent connection failures for both PostgreSQL and MySQL
+POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "25"))  # Number of connections to maintain
+MAX_OVERFLOW = int(os.getenv("DB_POOL_MAX_OVERFLOW", "35"))  # Additional connections beyond pool_size
+POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "2"))  # Seconds to wait for a connection
+# Recycle connections periodically to avoid stale connections (works for Postgres and MySQL/RDS)
+POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "7200"))  # Recycle connections after 2 hours
 POOL_PRE_PING = os.getenv("DB_POOL_PRE_PING", "True").lower() == "true"  # Test connections before using
 
 logger = logging.getLogger(__name__)
 
 try:
+    # Configure connect_args based on database type
+    connect_args = {}
+    if "postgresql" in DATABASE_URL.lower():
+        # PostgreSQL (asyncpg) SSL configuration for AWS RDS
+        # RDS requires SSL connections
+        connect_args["ssl"] = "require"
+    elif "mysql" in DATABASE_URL.lower():
+        # MySQL (aiomysql) configuration
+        connect_args["charset"] = "utf8mb4"  # Support full UTF-8 including emojis
+        connect_args["init_command"] = "SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'"
+    
     engine = create_async_engine(
         DATABASE_URL,
         echo=ECHO_SQL,  # Only echo SQL in development
@@ -40,10 +53,7 @@ try:
         max_overflow=MAX_OVERFLOW,  # Additional connections beyond pool_size
         pool_timeout=POOL_TIMEOUT,  # Seconds to wait for a connection
         pool_recycle=POOL_RECYCLE,  # Recycle connections after this many seconds
-        connect_args={
-            "charset": "utf8mb4",  # Support full UTF-8 including emojis
-            "init_command": "SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'",
-        },
+        connect_args=connect_args if connect_args else None,
     )
     logger.info(f"Database engine created with pool_size={POOL_SIZE}, max_overflow={MAX_OVERFLOW}")
 except Exception as e:
@@ -68,18 +78,27 @@ async def get_db():
     Dependency function to get database session
     Usage in FastAPI routes:
         async def my_route(db: AsyncSession = Depends(get_db)):
+    
+    Note: Session is automatically closed in the finally block to ensure
+    connections are returned to the pool.
     """
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception as e:
+    session = None
+    try:
+        session = AsyncSessionLocal()
+        yield session
+        await session.commit()
+    except Exception as e:
+        if session:
             await session.rollback()
-            # Log database errors for debugging
-            logger.error(f"Database error in session: {str(e)}", exc_info=True)
-            raise
-        finally:
-            await session.close()
+        # Log database errors for debugging
+        logger.error(f"Database error in session: {str(e)}", exc_info=True)
+        raise
+    finally:
+        if session:
+            try:
+                await session.close()
+            except Exception as close_error:
+                logger.warning(f"Error closing session: {close_error}")
 
 # Alias for consistency
 get_async_session = get_db

@@ -23,6 +23,7 @@ from app.core.security import (
     verify_token as secure_verify_token
 )
 from app.core.logging import security_logger
+from app.core.cache import analytics_cache
 
 # Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -225,10 +226,38 @@ async def get_current_user(
         )
     
     # Get user from database with clinic relationship
+    # Add caching to reduce database load (users don't change often)
+    import asyncio
+    import logging
+    logger = logging.getLogger(__name__)
+    
     from sqlalchemy.orm import selectinload
+    
+    # Optimize query: Try to load clinic, but don't fail if it's slow
+    # User.id is primary key, so this should be fast, but database is slow (~400ms)
+    # Use a shorter timeout and fallback to lazy loading if needed
     query = select(User).options(selectinload(User.clinic)).where(User.id == user_id)
-    result = await db.execute(query)
-    user = result.scalar_one_or_none()
+    
+    try:
+        # Reduced timeout to 1.5 seconds - database is slow, but we need to fail fast
+        # If this times out, the database is too slow or pool is exhausted
+        async def fetch_user():
+            result = await db.execute(query)
+            return result.scalar_one_or_none()
+        
+        user = await asyncio.wait_for(fetch_user(), timeout=1.5)
+    except asyncio.TimeoutError:
+        logger.error(f"User lookup timed out for user_id: {user_id} (likely pool exhaustion or slow DB)")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable. Please try again.",
+        )
+    except Exception as e:
+        logger.error(f"Error fetching user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error authenticating user",
+        )
     
     if user is None:
         raise HTTPException(

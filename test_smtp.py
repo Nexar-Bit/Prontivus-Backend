@@ -172,27 +172,46 @@ Se você não esperava receber este email, pode ignorá-lo com segurança.
                     print(f"📤 Sending test email to {test_email}...")
                     server.send_message(msg)
             except (ConnectionResetError, OSError, socket.timeout) as e:
-                print(f"⚠️  SSL connection failed: {str(e)}")
-                print(f"⚠️  Trying alternative port 80 (GoDaddy sometimes uses this)...")
-                # Try alternative: port 80 (GoDaddy sometimes uses this)
-                try:
-                    smtp_port_alt = 80
-                    with smtplib.SMTP(smtp_host, smtp_port_alt, timeout=60) as server:
-                        server.starttls(context=context)
-                        server.login(smtp_user, smtp_password)
-                        print(f"✅ Authentication successful on port 80!")
-                        print(f"📤 Sending test email to {test_email}...")
-                        server.send_message(msg)
-                except Exception as e2:
-                    print(f"⚠️  Port 80 also failed, trying port 587 with TLS...")
-                    # Try alternative: port 587 with TLS
-                    smtp_port_alt = 587
-                    with smtplib.SMTP(smtp_host, smtp_port_alt, timeout=60) as server:
-                        server.starttls(context=context)
-                        server.login(smtp_user, smtp_password)
-                        print(f"✅ Authentication successful on port 587!")
-                        print(f"📤 Sending test email to {test_email}...")
-                        server.send_message(msg)
+                print(f"⚠️  SSL connection failed on port 465: {str(e)}")
+                print(f"⚠️  Trying alternative GoDaddy ports...")
+                
+                # GoDaddy alternative ports: 587 (TLS), 3535 (SSL), 80, 25
+                alternative_ports = [
+                    (587, "TLS"),  # Most reliable
+                    (3535, "SSL"),  # Alternative SSL port
+                    (80, "TLS"),   # HTTP port (sometimes works)
+                    (25, "TLS"),   # Standard SMTP (may be blocked)
+                ]
+                
+                success = False
+                for alt_port, connection_type in alternative_ports:
+                    try:
+                        print(f"   Trying port {alt_port} ({connection_type})...")
+                        if connection_type == "SSL":
+                            with smtplib.SMTP_SSL(smtp_host, alt_port, context=context, timeout=60) as server:
+                                server.login(smtp_user, smtp_password)
+                                print(f"✅ Authentication successful on port {alt_port} ({connection_type})!")
+                                print(f"📤 Sending test email to {test_email}...")
+                                server.send_message(msg)
+                                success = True
+                                print(f"\n💡 RECOMMENDATION: Use port {alt_port} instead of 465")
+                                break
+                        else:  # TLS
+                            with smtplib.SMTP(smtp_host, alt_port, timeout=60) as server:
+                                server.starttls(context=context)
+                                server.login(smtp_user, smtp_password)
+                                print(f"✅ Authentication successful on port {alt_port} ({connection_type})!")
+                                print(f"📤 Sending test email to {test_email}...")
+                                server.send_message(msg)
+                                success = True
+                                print(f"\n💡 RECOMMENDATION: Use port {alt_port} instead of 465")
+                                break
+                    except Exception as e_alt:
+                        print(f"   ❌ Port {alt_port} failed: {str(e_alt)[:100]}")
+                        continue
+                
+                if not success:
+                    raise Exception("All GoDaddy ports (465, 587, 3535, 80, 25) failed. Check credentials and network.")
         else:
             # Use TLS for port 587 and others
             print(f"📧 Using TLS connection (port {smtp_port})...")

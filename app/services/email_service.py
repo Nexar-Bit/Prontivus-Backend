@@ -89,13 +89,14 @@ class EmailService:
             # Use longer timeout for GoDaddy and other servers that may be slower
             timeout = 60
             
-            if self.smtp_port == 465:
-                # Use SSL for port 465
+            # Port 465 and 3535 use SSL, others use TLS
+            if self.smtp_port == 465 or self.smtp_port == 3535:
+                # Use SSL for ports 465 and 3535 (GoDaddy alternative SSL port)
                 with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, context=context, timeout=timeout) as server:
                     server.login(self.smtp_user, self.smtp_password)
                     server.send_message(msg)
             else:
-                # Use TLS for port 587 and others
+                # Use TLS for port 587 and others (25, 80, etc.)
                 with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=timeout) as server:
                     server.starttls(context=context)
                     server.login(self.smtp_user, self.smtp_password)

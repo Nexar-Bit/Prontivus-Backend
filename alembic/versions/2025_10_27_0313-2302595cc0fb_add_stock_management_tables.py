@@ -99,8 +99,10 @@ def upgrade() -> None:
             op.drop_index('ix_invoices_appointment_id', table_name='invoices')
         if 'ix_invoices_clinic_id' in invoices_indexes:
             op.drop_index('ix_invoices_clinic_id', table_name='invoices')
-    op.drop_index('ix_invoices_patient_id', table_name='invoices')
-    op.drop_index('ix_invoices_status', table_name='invoices')
+        if 'ix_invoices_patient_id' in invoices_indexes:
+            op.drop_index('ix_invoices_patient_id', table_name='invoices')
+        if 'ix_invoices_status' in invoices_indexes:
+            op.drop_index('ix_invoices_status', table_name='invoices')
     # ### end Alembic commands ###
 
 

@@ -35,7 +35,7 @@ async def list_notifications(
     - Staff (admin/secretary/doctor): unresolved stock alerts, recent appointments, and unread messages
     - Patient: upcoming appointments and unread messages
     Optimized to run queries in parallel for better performance.
-    Uses caching to improve performance (30 second TTL).
+    Uses caching to improve performance (2 minute TTL to reduce database load).
     """
     # Check cache first (30 second TTL for notifications)
     cache_key = f"notifications:user_{current_user.id}"
@@ -248,8 +248,8 @@ async def list_notifications(
                     })
         
         result = {"data": notifications}
-        # Cache the result for 30 seconds
-        analytics_cache.set(cache_key, result, ttl_seconds=30)
+        # Cache the result for 2 minutes (increased to reduce database load)
+        analytics_cache.set(cache_key, result, ttl_seconds=120)
         return result
         
     except Exception as e:

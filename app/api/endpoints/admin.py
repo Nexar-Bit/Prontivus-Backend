@@ -38,24 +38,40 @@ from app.services.email_service import email_service
 logger = logging.getLogger(__name__)
 
 
-def generate_secure_password(length: int = 12) -> str:
+def generate_secure_password(min_length: int = 16, max_length: int = 20) -> str:
     """
-    Generate a secure random password that meets basic complexity requirements.
+    Generate a truly random, cryptographically secure password.
+    Uses variable length and ensures all character types are present.
+    This makes passwords unpredictable and non-pattern-based.
     """
-    if length < 10:
-        length = 10
-
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
-
-    while True:
-        pwd = "".join(secrets.choice(alphabet) for _ in range(length))
-        if (
-            any(c.islower() for c in pwd)
-            and any(c.isupper() for c in pwd)
-            and any(c.isdigit() for c in pwd)
-            and any(c in "!@#$%^&*()-_=+" for c in pwd)
-        ):
-            return pwd
+    # Use variable length for unpredictability (between min and max)
+    length = secrets.randbelow(max_length - min_length + 1) + min_length
+    
+    # Separate character sets for better distribution
+    lowercase = string.ascii_lowercase
+    uppercase = string.ascii_uppercase
+    digits = string.digits
+    special = "!@#$%^&*()-_=+[]{}|;:,.<>?"
+    
+    # Ensure at least one of each type, then fill the rest randomly
+    # This guarantees complexity while maintaining true randomness
+    password_chars = [
+        secrets.choice(lowercase),   # At least 1 lowercase
+        secrets.choice(uppercase),   # At least 1 uppercase
+        secrets.choice(digits),      # At least 1 digit
+        secrets.choice(special),     # At least 1 special char
+    ]
+    
+    # Fill remaining positions with random characters from all sets
+    all_chars = lowercase + uppercase + digits + special
+    remaining_length = length - len(password_chars)
+    password_chars.extend(secrets.choice(all_chars) for _ in range(remaining_length))
+    
+    # Shuffle the password to randomize character positions
+    # This ensures the required characters aren't always at the start
+    secrets.SystemRandom().shuffle(password_chars)
+    
+    return "".join(password_chars)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -758,8 +774,8 @@ async def create_clinic(
         else:
             admin_email = f"admin_{clinic.id}_{int(time.time())}@{clinic_name_slug}.com"
     
-    # Generate secure random password for the clinic admin user (16 characters for better security)
-    default_password = generate_secure_password(length=16)
+    # Generate truly random, cryptographically secure password (variable length 16-20 chars)
+    default_password = generate_secure_password(min_length=16, max_length=20)
     
     # Create AdminClinica user for the new clinic
     admin_user = User(
@@ -781,8 +797,13 @@ async def create_clinic(
     await db.refresh(clinic)
     await db.refresh(admin_user)
     
-    # Send credentials email in background (non-blocking)
-    recipient_email = clinic.email or admin_email
+    # Send credentials email to the clinic's email address (not the admin user's email)
+    # Use clinic_data.email (the clinic's actual email) as the recipient
+    recipient_email = clinic_data.email
+    if not recipient_email:
+        logger.warning(f"No email address provided for clinic {clinic.id}. Credentials email will not be sent.")
+        recipient_email = None
+    
     if recipient_email:
         # Create a background task to send email
         async def send_clinic_admin_email():

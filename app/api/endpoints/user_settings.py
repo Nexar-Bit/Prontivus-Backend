@@ -5,6 +5,8 @@ Handles user preferences and settings management
 from typing import Optional
 import os
 import uuid
+import asyncio
+import logging
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from PIL import Image
 import io
+
+logger = logging.getLogger(__name__)
 
 from app.core.auth import get_current_user
 from app.core.cache import analytics_cache
@@ -60,23 +64,121 @@ async def get_user_settings(
     """
     Get current user's settings
     Returns settings with profile information
-    Uses caching to improve performance (2 minute TTL).
+    Uses caching to improve performance (5 minute TTL to reduce database load).
+    Returns defaults immediately if queries timeout (within 3 seconds).
     """
-    # Check cache first (2 minute TTL for user settings)
-    cache_key = f"user_settings:user_{current_user.id}"
-    cached_result = analytics_cache.get(cache_key)
-    if cached_result:
-        return UserSettingsFullResponse.model_validate(cached_result)
-    
-    # Get or create user settings
-    result = await db.execute(
-        select(UserSettings).where(UserSettings.user_id == current_user.id)
-    )
-    user_settings = result.scalar_one_or_none()
-    
-    # If no settings exist, return defaults
-    if not user_settings:
+    # Wrap entire endpoint in timeout to ensure fast response
+    async def _get_settings():
+        # Check cache first (5 minute TTL for user settings to reduce database load)
+        cache_key = f"user_settings:user_{current_user.id}"
+        cached_result = analytics_cache.get(cache_key)
+        if cached_result:
+            logger.debug(f"Returning cached user settings for user {current_user.id}")
+            return UserSettingsFullResponse.model_validate(cached_result)
+        
+        # Get or create user settings with timeout to prevent hanging
+        async def fetch_user_settings():
+            result = await db.execute(
+                select(UserSettings).where(UserSettings.user_id == current_user.id)
+            )
+            return result.scalar_one_or_none()
+        
+        try:
+            # Add 2 second timeout for database query (fail fast to prevent frontend timeouts)
+            user_settings = await asyncio.wait_for(fetch_user_settings(), timeout=2.0)
+        except asyncio.TimeoutError:
+            # If query times out, return defaults immediately
+            logger.warning(f"User settings query timed out for user {current_user.id}, returning defaults")
+            defaults = get_default_settings()
+            cache_key = f"user_settings:user_{current_user.id}"
+            result = UserSettingsFullResponse(
+                profile={
+                    "firstName": current_user.first_name or "",
+                    "lastName": current_user.last_name or "",
+                    "email": current_user.email,
+                    "phone": "",
+                    "avatar": None,
+                },
+                notifications=defaults["notifications"],
+                privacy=defaults["privacy"],
+                appearance=defaults["appearance"],
+                security=defaults["security"],
+            )
+            # Cache the default result for 30 seconds (shorter TTL for error case)
+            analytics_cache.set(cache_key, result.model_dump(), ttl_seconds=30)
+            return result
+        except Exception as e:
+            # If any other error occurs, return defaults immediately
+            logger.warning(f"Error fetching user settings for user {current_user.id}: {str(e)}, returning defaults")
+            defaults = get_default_settings()
+            cache_key = f"user_settings:user_{current_user.id}"
+            result = UserSettingsFullResponse(
+                profile={
+                    "firstName": current_user.first_name or "",
+                    "lastName": current_user.last_name or "",
+                    "email": current_user.email,
+                    "phone": "",
+                    "avatar": None,
+                },
+                notifications=defaults["notifications"],
+                privacy=defaults["privacy"],
+                appearance=defaults["appearance"],
+                security=defaults["security"],
+            )
+            # Cache the default result for 30 seconds
+            analytics_cache.set(cache_key, result.model_dump(), ttl_seconds=30)
+            return result
+        
+        # If no settings exist, return defaults
+        if not user_settings:
+            defaults = get_default_settings()
+            cache_key = f"user_settings:user_{current_user.id}"
+            result = UserSettingsFullResponse(
+                profile={
+                    "firstName": current_user.first_name or "",
+                    "lastName": current_user.last_name or "",
+                    "email": current_user.email,
+                    "phone": "",
+                    "avatar": None,
+                },
+                notifications=defaults["notifications"],
+                privacy=defaults["privacy"],
+                appearance=defaults["appearance"],
+                security=defaults["security"],
+            )
+            # Cache the result for 5 minutes (increased to reduce database load)
+            analytics_cache.set(cache_key, result.model_dump(), ttl_seconds=300)
+            return result
+        
+        # Return settings with profile info
+        # Use get() to handle None values, but preserve empty dicts
         defaults = get_default_settings()
+        cache_key = f"user_settings:user_{current_user.id}"
+        result = UserSettingsFullResponse(
+            profile={
+                "firstName": current_user.first_name or "",
+                "lastName": current_user.last_name or "",
+                "email": current_user.email,
+                "phone": user_settings.phone or "",
+                "avatar": user_settings.avatar_url or None,
+            },
+            notifications=user_settings.notifications if user_settings.notifications is not None else defaults["notifications"],
+            privacy=user_settings.privacy if user_settings.privacy is not None else defaults["privacy"],
+            appearance=user_settings.appearance if user_settings.appearance is not None else defaults["appearance"],
+            security=user_settings.security if user_settings.security is not None else defaults["security"],
+        )
+        # Cache the result for 5 minutes (increased to reduce database load)
+        analytics_cache.set(cache_key, result.model_dump(), ttl_seconds=300)
+        return result
+    
+    # Wrap entire function in 3 second timeout to ensure fast response (fail fast)
+    try:
+        return await asyncio.wait_for(_get_settings(), timeout=3.0)
+    except asyncio.TimeoutError:
+        logger.error(f"User settings endpoint timed out for user {current_user.id}, returning defaults")
+        # Return defaults immediately
+        defaults = get_default_settings()
+        cache_key = f"user_settings:user_{current_user.id}"
         result = UserSettingsFullResponse(
             profile={
                 "firstName": current_user.first_name or "",
@@ -90,29 +192,9 @@ async def get_user_settings(
             appearance=defaults["appearance"],
             security=defaults["security"],
         )
-        # Cache the result for 2 minutes
-        analytics_cache.set(cache_key, result.model_dump(), ttl_seconds=120)
+        # Cache defaults for 30 seconds
+        analytics_cache.set(cache_key, result.model_dump(), ttl_seconds=30)
         return result
-    
-    # Return settings with profile info
-    # Use get() to handle None values, but preserve empty dicts
-    defaults = get_default_settings()
-    result = UserSettingsFullResponse(
-        profile={
-            "firstName": current_user.first_name or "",
-            "lastName": current_user.last_name or "",
-            "email": current_user.email,
-            "phone": user_settings.phone or "",
-            "avatar": user_settings.avatar_url or None,
-        },
-        notifications=user_settings.notifications if user_settings.notifications is not None else defaults["notifications"],
-        privacy=user_settings.privacy if user_settings.privacy is not None else defaults["privacy"],
-        appearance=user_settings.appearance if user_settings.appearance is not None else defaults["appearance"],
-        security=user_settings.security if user_settings.security is not None else defaults["security"],
-    )
-    # Cache the result for 2 minutes
-    analytics_cache.set(cache_key, result.model_dump(), ttl_seconds=120)
-    return result
 
 
 @router.put("/me", response_model=UserSettingsResponse)
