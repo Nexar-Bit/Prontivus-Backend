@@ -10,7 +10,7 @@ import os
 import json
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback
 from app.api.endpoints import icd10
 
 # Import security middleware
@@ -75,6 +75,14 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Authorization", "X-Request-Id"],
 )
+
+# Add cache headers middleware for browser caching (after CORS, before security)
+try:
+    from app.middleware.cache_headers import CacheHeadersMiddleware
+    app.add_middleware(CacheHeadersMiddleware)
+except ImportError:
+    # Middleware is optional, continue without it if not available
+    pass
 
 # Add security middleware (order matters!)
 app.add_middleware(SecurityHeadersMiddleware)
@@ -277,7 +285,6 @@ app.include_router(tiss_config.router, prefix=f"{API_V1_PREFIX}/financial", tags
 app.include_router(user_settings.router, prefix=API_V1_PREFIX, tags=["User Settings"])
 app.include_router(messages.router, prefix=API_V1_PREFIX, tags=["Messages"])
 app.include_router(menu.router, prefix=API_V1_PREFIX, tags=["Menu Management"])
-app.include_router(rbac_test.router, prefix=API_V1_PREFIX, tags=["RBAC Testing"])
 app.include_router(patient_dashboard.router, prefix=API_V1_PREFIX, tags=["Patient Dashboard"])
 app.include_router(secretary_dashboard.router, prefix=API_V1_PREFIX, tags=["Secretary Dashboard"])
 app.include_router(doctor_dashboard.router, prefix=API_V1_PREFIX, tags=["Doctor Dashboard"])

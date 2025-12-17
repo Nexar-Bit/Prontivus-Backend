@@ -30,7 +30,10 @@ from app.schemas.auth import (
     ForgotPasswordRequest,
     ResetPasswordRequest
 )
+import logging
 from config import settings
+
+logger = logging.getLogger(__name__)
 from app.services.login_alert_service import send_login_alert
 from app.services.menu_service import MenuService
 
@@ -387,7 +390,24 @@ async def verify_token_endpoint(
     Returns:
         User data if token is valid
     """
-    return UserResponse.model_validate(current_user)
+    try:
+        return UserResponse.model_validate(current_user)
+    except Exception as e:
+        logger.error(f"Error validating user response for verify-token: {str(e)}", exc_info=True)
+        # Return a basic user response even if validation fails
+        # This prevents 500 errors from model validation issues
+        return UserResponse(
+            id=current_user.id,
+            username=current_user.username or "",
+            email=current_user.email or "",
+            first_name=current_user.first_name,
+            last_name=current_user.last_name,
+            role=current_user.role,
+            role_id=current_user.role_id,
+            clinic_id=current_user.clinic_id,
+            is_active=current_user.is_active if current_user.is_active is not None else True,
+            is_verified=current_user.is_verified if current_user.is_verified is not None else False,
+        )
 
 
 @router.post("/forgot-password", response_model=MessageResponse)

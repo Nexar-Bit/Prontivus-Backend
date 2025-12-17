@@ -1229,44 +1229,51 @@ async def delete_clinic(
         
         # First, delete prescriptions that reference clinical_records linked to appointments
         # Using JOIN syntax for MySQL compatibility (some MySQL versions don't allow subqueries in DELETE)
+        # PostgreSQL syntax: DELETE FROM table USING other_tables WHERE ...
         await safe_delete_optional("""
-            DELETE p FROM prescriptions p
-            INNER JOIN clinical_records cr ON p.clinical_record_id = cr.id
-            INNER JOIN appointments a ON cr.appointment_id = a.id
-            WHERE a.clinic_id = :clinic_id
+            DELETE FROM prescriptions p
+            USING clinical_records cr, appointments a
+            WHERE p.clinical_record_id = cr.id
+            AND cr.appointment_id = a.id
+            AND a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "prescriptions")
         
         # Then delete diagnoses that reference clinical_records linked to appointments
         await safe_delete_optional("""
-            DELETE d FROM diagnoses d
-            INNER JOIN clinical_records cr ON d.clinical_record_id = cr.id
-            INNER JOIN appointments a ON cr.appointment_id = a.id
-            WHERE a.clinic_id = :clinic_id
+            DELETE FROM diagnoses d
+            USING clinical_records cr, appointments a
+            WHERE d.clinical_record_id = cr.id
+            AND cr.appointment_id = a.id
+            AND a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "diagnoses")
         
         # Finally, delete clinical_records that reference appointments
         await safe_delete_optional("""
-            DELETE cr FROM clinical_records cr
-            INNER JOIN appointments a ON cr.appointment_id = a.id
-            WHERE a.clinic_id = :clinic_id
+            DELETE FROM clinical_records cr
+            USING appointments a
+            WHERE cr.appointment_id = a.id
+            AND a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "clinical_records")
         
         await safe_delete_optional("""
-            DELETE pc FROM patient_calls pc
-            INNER JOIN appointments a ON pc.appointment_id = a.id
-            WHERE a.clinic_id = :clinic_id
+            DELETE FROM patient_calls pc
+            USING appointments a
+            WHERE pc.appointment_id = a.id
+            AND a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "patient_calls")
         
         await safe_delete_optional("""
-            DELETE fu FROM file_uploads fu
-            INNER JOIN appointments a ON fu.appointment_id = a.id
-            WHERE a.clinic_id = :clinic_id
+            DELETE FROM file_uploads fu
+            USING appointments a
+            WHERE fu.appointment_id = a.id
+            AND a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "file_uploads")
         
         await safe_delete_optional("""
-            DELETE vs FROM voice_sessions vs
-            INNER JOIN appointments a ON vs.appointment_id = a.id
-            WHERE a.clinic_id = :clinic_id
+            DELETE FROM voice_sessions vs
+            USING appointments a
+            WHERE vs.appointment_id = a.id
+            AND a.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "voice_sessions (by appointment)")
         
         # Delete stock movements (optional - table might not exist)
@@ -1289,18 +1296,22 @@ async def delete_clinic(
         
         # Delete voice sessions by user_id (optional - table might not exist)
         # Note: voice_sessions by appointment_id were already deleted above
+        # PostgreSQL syntax: DELETE FROM table USING other_tables WHERE ...
         await safe_delete_optional("""
-            DELETE vs FROM voice_sessions vs
-            INNER JOIN users u ON vs.user_id = u.id
-            WHERE u.clinic_id = :clinic_id
-               AND vs.appointment_id IS NULL
+            DELETE FROM voice_sessions vs
+            USING users u
+            WHERE vs.user_id = u.id
+            AND u.clinic_id = :clinic_id
+            AND vs.appointment_id IS NULL
         """, {"clinic_id": clinic_id}, "voice_sessions (by user)")
         
         # Delete user settings (optional - table might not exist)
+        # PostgreSQL syntax: DELETE FROM table USING other_tables WHERE ...
         await safe_delete_optional("""
-            DELETE us FROM user_settings us
-            INNER JOIN users u ON us.user_id = u.id
-            WHERE u.clinic_id = :clinic_id
+            DELETE FROM user_settings us
+            USING users u
+            WHERE us.user_id = u.id
+            AND u.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "user_settings")
         
         # Delete AI configs (optional - table might not exist)
@@ -1371,9 +1382,10 @@ async def delete_clinic(
             # Try method 1: If invoices has clinic_id, use it directly
             try:
                 await db.execute(text("""
-                    DELETE il FROM invoice_lines il
-                    INNER JOIN invoices i ON il.invoice_id = i.id
-                    WHERE i.clinic_id = :clinic_id
+                    DELETE FROM invoice_lines il
+                    USING invoices i
+                    WHERE il.invoice_id = i.id
+                    AND i.clinic_id = :clinic_id
                 """), {"clinic_id": clinic_id})
                 logger.info(f"Successfully deleted invoice_lines using invoices.clinic_id")
             except Exception as e1:
@@ -1383,10 +1395,11 @@ async def delete_clinic(
                     logger.info(f"invoices.clinic_id doesn't exist, trying join through appointments")
                     try:
                         await db.execute(text("""
-                            DELETE il FROM invoice_lines il
-                            INNER JOIN invoices i ON il.invoice_id = i.id
-                            INNER JOIN appointments a ON i.appointment_id = a.id
-                            WHERE a.clinic_id = :clinic_id
+                            DELETE FROM invoice_lines il
+                            USING invoices i, appointments a
+                            WHERE il.invoice_id = i.id
+                            AND i.appointment_id = a.id
+                            AND a.clinic_id = :clinic_id
                         """), {"clinic_id": clinic_id})
                         logger.info(f"Successfully deleted invoice_lines using appointments.clinic_id")
                     except Exception as e2:
@@ -1395,10 +1408,11 @@ async def delete_clinic(
                             # Method 2 failed, try method 3: Join through patients
                             logger.info(f"Join through appointments failed, trying join through patients")
                             await db.execute(text("""
-                                DELETE il FROM invoice_lines il
-                                INNER JOIN invoices i ON il.invoice_id = i.id
-                                INNER JOIN patients pt ON i.patient_id = pt.id
-                                WHERE pt.clinic_id = :clinic_id
+                                DELETE FROM invoice_lines il
+                                USING invoices i, patients pt
+                                WHERE il.invoice_id = i.id
+                                AND i.patient_id = pt.id
+                                AND pt.clinic_id = :clinic_id
                             """), {"clinic_id": clinic_id})
                             logger.info(f"Successfully deleted invoice_lines using patients.clinic_id")
                         else:
@@ -1433,9 +1447,10 @@ async def delete_clinic(
             # Try method 1: If invoices has clinic_id, use it directly
             try:
                 await db.execute(text("""
-                    DELETE p FROM payments p
-                    INNER JOIN invoices i ON p.invoice_id = i.id
-                    WHERE i.clinic_id = :clinic_id
+                    DELETE FROM payments p
+                    USING invoices i
+                    WHERE p.invoice_id = i.id
+                    AND i.clinic_id = :clinic_id
                 """), {"clinic_id": clinic_id})
                 logger.info(f"Successfully deleted payments using invoices.clinic_id")
             except Exception as e1:
@@ -1445,10 +1460,11 @@ async def delete_clinic(
                     logger.info(f"invoices.clinic_id doesn't exist, trying join through appointments")
                     try:
                         await db.execute(text("""
-                            DELETE p FROM payments p
-                            INNER JOIN invoices i ON p.invoice_id = i.id
-                            INNER JOIN appointments a ON i.appointment_id = a.id
-                            WHERE a.clinic_id = :clinic_id
+                            DELETE FROM payments p
+                            USING invoices i, appointments a
+                            WHERE p.invoice_id = i.id
+                            AND i.appointment_id = a.id
+                            AND a.clinic_id = :clinic_id
                         """), {"clinic_id": clinic_id})
                         logger.info(f"Successfully deleted payments using appointments.clinic_id")
                     except Exception as e2:
@@ -1457,10 +1473,11 @@ async def delete_clinic(
                             # Method 2 failed, try method 3: Join through patients
                             logger.info(f"Join through appointments failed, trying join through patients")
                             await db.execute(text("""
-                                DELETE p FROM payments p
-                                INNER JOIN invoices i ON p.invoice_id = i.id
-                                INNER JOIN patients pt ON i.patient_id = pt.id
-                                WHERE pt.clinic_id = :clinic_id
+                                DELETE FROM payments p
+                                USING invoices i, patients pt
+                                WHERE p.invoice_id = i.id
+                                AND i.patient_id = pt.id
+                                AND pt.clinic_id = :clinic_id
                             """), {"clinic_id": clinic_id})
                             logger.info(f"Successfully deleted payments using patients.clinic_id")
                         else:
@@ -1484,10 +1501,12 @@ async def delete_clinic(
                 raise
         
         # Delete payments created by users from this clinic
+        # PostgreSQL syntax: DELETE FROM table USING other_tables WHERE ...
         await safe_delete("""
-            DELETE p FROM payments p
-            INNER JOIN users u ON p.created_by = u.id
-            WHERE u.clinic_id = :clinic_id
+            DELETE FROM payments p
+            USING users u
+            WHERE p.created_by = u.id
+            AND u.clinic_id = :clinic_id
         """, {"clinic_id": clinic_id}, "payments (by user)")
         
         # 4. Delete invoices (must be deleted before appointments since invoices reference appointments)
@@ -1506,9 +1525,10 @@ async def delete_clinic(
                     logger.info(f"invoices.clinic_id doesn't exist, trying join through appointments")
                     try:
                         await db.execute(text("""
-                            DELETE i FROM invoices i
-                            INNER JOIN appointments a ON i.appointment_id = a.id
-                            WHERE a.clinic_id = :clinic_id
+                            DELETE FROM invoices i
+                            USING appointments a
+                            WHERE i.appointment_id = a.id
+                            AND a.clinic_id = :clinic_id
                         """), {"clinic_id": clinic_id})
                         logger.info(f"Successfully deleted invoices using appointments.clinic_id")
                     except Exception as e2:
@@ -1517,9 +1537,10 @@ async def delete_clinic(
                             # Method 2 failed, try method 3: Join through patients
                             logger.info(f"Join through appointments failed, trying join through patients")
                             await db.execute(text("""
-                                DELETE i FROM invoices i
-                                INNER JOIN patients pt ON i.patient_id = pt.id
-                                WHERE pt.clinic_id = :clinic_id
+                                DELETE FROM invoices i
+                                USING patients pt
+                                WHERE i.patient_id = pt.id
+                                AND pt.clinic_id = :clinic_id
                             """), {"clinic_id": clinic_id})
                             logger.info(f"Successfully deleted invoices using patients.clinic_id")
                         else:

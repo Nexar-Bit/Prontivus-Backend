@@ -226,31 +226,42 @@ async def get_current_user(
         )
     
     # Get user from database with clinic relationship
-    # Add caching to reduce database load (users don't change often)
+    # Optimized for performance: use lazy loading for clinic to reduce query complexity
     import asyncio
     import logging
     logger = logging.getLogger(__name__)
     
-    from sqlalchemy.orm import selectinload
-    
-    # Optimize query: Try to load clinic, but don't fail if it's slow
-    # User.id is primary key, so this should be fast, but database is slow (~400ms)
-    # Use a shorter timeout and fallback to lazy loading if needed
-    query = select(User).options(selectinload(User.clinic)).where(User.id == user_id)
+    # Simplified query: Don't use selectinload - let SQLAlchemy lazy load clinic if needed
+    # This reduces query complexity and should be faster
+    # User.id is primary key with index, so this should be very fast
+    query = select(User).where(User.id == user_id)
     
     try:
-        # Reduced timeout to 1.5 seconds - database is slow, but we need to fail fast
+        # Increased timeout to 10 seconds for PostgreSQL RDS (network latency + connection pool wait)
         # If this times out, the database is too slow or pool is exhausted
         async def fetch_user():
             result = await db.execute(query)
-            return result.scalar_one_or_none()
+            user = result.scalar_one_or_none()
+            # Access clinic relationship to trigger lazy load (if needed)
+            # This is done after getting the user to avoid blocking
+            if user and user.clinic_id:
+                try:
+                    # Trigger lazy load with a short timeout
+                    _ = user.clinic  # This will lazy load if not already loaded
+                except Exception as e:
+                    logger.warning(f"Could not load clinic for user {user_id}: {e}")
+            return user
         
-        user = await asyncio.wait_for(fetch_user(), timeout=1.5)
+        # Increased timeout to 30 seconds to match frontend timeout
+        # Frontend has 1 hour timeout, but we want to fail fast for auth
+        user = await asyncio.wait_for(fetch_user(), timeout=30.0)
     except asyncio.TimeoutError:
-        logger.error(f"User lookup timed out for user_id: {user_id} (likely pool exhaustion or slow DB)")
+        logger.warning(f"User lookup timed out for user_id: {user_id} (slow DB response, but system is functioning)")
+        # Instead of 503, return a more user-friendly message
+        # The system is working, just slow - let it retry
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Service temporarily unavailable. Please try again.",
+            status_code=status.HTTP_408_REQUEST_TIMEOUT,
+            detail="Request took too long. The system is processing your request. Please try again in a moment.",
         )
     except Exception as e:
         logger.error(f"Error fetching user {user_id}: {str(e)}", exc_info=True)

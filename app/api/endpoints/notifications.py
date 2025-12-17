@@ -49,8 +49,9 @@ async def list_notifications(
     is_patient = str(current_user.role).lower() == "patient" if current_user.role else False
 
     try:
-        # Run all queries in parallel for better performance
-        if is_patient:
+        # Run all queries in parallel for better performance with timeout
+        # Total timeout: 5 seconds (10s auth + 5s queries + 1s network = 16s, frontend timeout is 15s)
+        async def fetch_patient_notifications():
             # Patient: get patient record and unread messages in parallel
             patient_query = select(Patient).filter(
                 and_(
@@ -97,6 +98,20 @@ async def list_notifications(
                     return_exceptions=True
                 )
                 
+                return patient, unread_result, appts_result
+            return None, None, None
+        
+        if is_patient:
+            try:
+                patient, unread_result, appts_result = await asyncio.wait_for(
+                    fetch_patient_notifications(),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Patient notifications query timed out for user {current_user.id}, returning empty")
+                return {"data": []}
+            
+            if patient:
                 # Process unread messages
                 if not isinstance(unread_result, Exception):
                     unread_message_count = unread_result.scalar() or 0
@@ -134,60 +149,68 @@ async def list_notifications(
                             "actionUrl": "/patient/appointments",
                             "actionText": "Ver consulta",
                         })
-            else:
-                # No patient record found, return empty notifications
-                return {"data": notifications}
+            # If no patient record found, notifications list remains empty
         else:
-            # Staff: run all queries in parallel
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            today_end = today_start + timedelta(days=1)
-            
-            # Staff: count messages from patients that are unread
-            unread_query = select(func.count(Message.id)).join(
-                MessageThread, Message.thread_id == MessageThread.id
-            ).filter(
-                and_(
-                    MessageThread.provider_id == current_user.id,
-                    MessageThread.clinic_id == current_user.clinic_id,
-                    Message.sender_type == "patient",
-                    Message.status != MessageStatus.READ.value
-                )
-            )
-            
-            # Stock alerts query
-            alerts_stmt = (
-                select(StockAlert)
-                .where(
+            # Staff: run all queries in parallel with timeout
+            async def fetch_staff_notifications():
+                today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                today_end = today_start + timedelta(days=1)
+                
+                # Staff: count messages from patients that are unread
+                unread_query = select(func.count(Message.id)).join(
+                    MessageThread, Message.thread_id == MessageThread.id
+                ).filter(
                     and_(
-                        StockAlert.clinic_id == current_user.clinic_id,
-                        StockAlert.is_resolved == False,  # noqa: E712
+                        MessageThread.provider_id == current_user.id,
+                        MessageThread.clinic_id == current_user.clinic_id,
+                        Message.sender_type == "patient",
+                        Message.status != MessageStatus.READ.value
                     )
                 )
-                .order_by(desc(StockAlert.created_at))
-                .limit(100)
-            )
-            
-            # Today's appointments query
-            appt_stmt = (
-                select(Appointment)
-                .where(
-                    and_(
-                        Appointment.clinic_id == current_user.clinic_id,
-                        Appointment.scheduled_datetime >= today_start,
-                        Appointment.scheduled_datetime < today_end,
+                
+                # Stock alerts query
+                alerts_stmt = (
+                    select(StockAlert)
+                    .where(
+                        and_(
+                            StockAlert.clinic_id == current_user.clinic_id,
+                            StockAlert.is_resolved == False,  # noqa: E712
+                        )
                     )
+                    .order_by(desc(StockAlert.created_at))
+                    .limit(100)
                 )
-                .order_by(Appointment.scheduled_datetime)
-                .limit(50)
-            )
+                
+                # Today's appointments query
+                appt_stmt = (
+                    select(Appointment)
+                    .where(
+                        and_(
+                            Appointment.clinic_id == current_user.clinic_id,
+                            Appointment.scheduled_datetime >= today_start,
+                            Appointment.scheduled_datetime < today_end,
+                        )
+                    )
+                    .order_by(Appointment.scheduled_datetime)
+                    .limit(50)
+                )
+                
+                # Execute all queries in parallel
+                return await asyncio.gather(
+                    db.execute(unread_query),
+                    db.execute(alerts_stmt),
+                    db.execute(appt_stmt),
+                    return_exceptions=True
+                )
             
-            # Execute all queries in parallel
-            unread_result, alerts_result, appts_result = await asyncio.gather(
-                db.execute(unread_query),
-                db.execute(alerts_stmt),
-                db.execute(appt_stmt),
-                return_exceptions=True
-            )
+            try:
+                unread_result, alerts_result, appts_result = await asyncio.wait_for(
+                    fetch_staff_notifications(),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Staff notifications query timed out for user {current_user.id}, returning empty")
+                return {"data": []}
             
             # Process unread messages
             if not isinstance(unread_result, Exception):

@@ -132,7 +132,7 @@ async def get_dashboard_stats(
                     db.execute(pending_results_query),
                     return_exceptions=True
                 ),
-                timeout=5.0  # 5 second timeout - fail fast to prevent frontend timeouts (2s auth + 5s queries = ~7s total)
+                timeout=7.0  # 7 second timeout - allows for network latency to PostgreSQL RDS (10s auth + 7s queries + 2s network = ~19s total, frontend timeout is 20s)
             )
         except asyncio.TimeoutError:
             logger.warning(f"Dashboard stats queries timed out for clinic {current_user.clinic_id}, returning defaults")

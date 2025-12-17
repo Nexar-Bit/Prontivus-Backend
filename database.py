@@ -25,7 +25,7 @@ ECHO_SQL = (ENVIRONMENT == "development" and DEBUG)
 # These settings help prevent intermittent connection failures for both PostgreSQL and MySQL
 POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "25"))  # Number of connections to maintain
 MAX_OVERFLOW = int(os.getenv("DB_POOL_MAX_OVERFLOW", "35"))  # Additional connections beyond pool_size
-POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "2"))  # Seconds to wait for a connection
+POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "5"))  # Seconds to wait for a connection (increased for PostgreSQL RDS)
 # Recycle connections periodically to avoid stale connections (works for Postgres and MySQL/RDS)
 POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "7200"))  # Recycle connections after 2 hours
 POOL_PRE_PING = os.getenv("DB_POOL_PRE_PING", "True").lower() == "true"  # Test connections before using
