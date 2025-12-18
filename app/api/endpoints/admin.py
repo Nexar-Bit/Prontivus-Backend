@@ -1240,6 +1240,9 @@ async def delete_clinic(
         # 9. Delete service_items (they reference clinics)
         await safe_delete_optional("DELETE FROM service_items WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "service_items")
         
+        # Delete AI configs (optional - table might not exist)
+        await safe_delete_optional("DELETE FROM ai_configs WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "ai_configs")
+        
         # Check for any remaining references to the clinic (e.g., licenses)
         # Delete license relationship if exists
         await safe_delete_optional("""
@@ -1278,6 +1281,7 @@ async def delete_clinic(
                     "procedures": "procedimentos",
                     "messages": "mensagens",
                     "message_threads": "conversas",
+                    "ai_configs": "configurações de IA",
                 }
                 
                 # Extract table name from error message
@@ -1340,6 +1344,7 @@ async def delete_clinic(
                 "procedures": "procedimentos",
                 "messages": "mensagens",
                 "message_threads": "conversas",
+                "ai_configs": "configurações de IA",
             }
             
             # Extract table name from error message
