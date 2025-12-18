@@ -7,9 +7,13 @@ from typing import List, Optional
 import secrets
 import string
 import os
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 from database import get_async_session
 from app.models import (
@@ -58,6 +62,70 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 
 # Require admin role for all endpoints
 require_admin = RoleChecker([UserRoleEnum.ADMIN])
+
+
+class TestEmailRequest(BaseModel):
+    """Payload for testing SMTP email delivery."""
+    to_email: Optional[str] = None
+    subject: Optional[str] = "Prontivus - Teste de Email"
+    message: Optional[str] = "Este é um email de teste do sistema Prontivus."
+
+
+@router.post("/email/test")
+async def test_smtp_email(
+    payload: TestEmailRequest,
+    current_user: User = Depends(require_admin),
+):
+    """
+    Test endpoint to verify SMTP configuration.
+    Sends a simple email and returns the result or error details.
+    """
+    to_email = payload.to_email or current_user.email
+    if not to_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nenhum endereço de email de destino foi fornecido e o usuário atual não possui email."
+        )
+
+    html_body = f"""
+    <html>
+      <body>
+        <p>{payload.message}</p>
+        <p><strong>Data/Hora:</strong> {datetime.utcnow().isoformat()} UTC</p>
+        <p><strong>Usuário teste:</strong> {current_user.username} (ID: {current_user.id})</p>
+      </body>
+    </html>
+    """
+
+    try:
+        logger.info(f"Testing SMTP email to {to_email} via {os.getenv('SMTP_HOST')}:{os.getenv('SMTP_PORT')}")
+        sent = await email_service.send_email(
+            to_email=to_email,
+            subject=payload.subject or "Prontivus - Teste de Email",
+            html_body=html_body,
+            text_body=payload.message or "",
+        )
+        if not sent:
+            # email_service already logged details; surface a clear message
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Falha ao enviar email de teste. Verifique as configurações SMTP e os logs do servidor."
+            )
+
+        return {
+            "status": "success",
+            "detail": f"Email de teste enviado para {to_email}. Verifique sua caixa de entrada/spam.",
+            "smtp_host": os.getenv("SMTP_HOST"),
+            "smtp_port": os.getenv("SMTP_PORT"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Erro ao enviar email de teste para {to_email}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro inesperado ao enviar email de teste: {str(e)}",
+        )
 
 
 @router.get("/clinics/stats", response_model=ClinicStatsResponse)
@@ -675,7 +743,12 @@ async def create_clinic(
             )
     
     # Create clinic
-    clinic = Clinic(**clinic_data.model_dump())
+    # Exclude license_id from model_dump since it's not in ClinicCreate schema
+    # and the database expects UUID type, not VARCHAR
+    clinic_dict = clinic_data.model_dump()
+    # Ensure license_id is not included (it should be set via license relationship, not directly)
+    clinic_dict.pop('license_id', None)
+    clinic = Clinic(**clinic_dict)
     db.add(clinic)
     await db.flush()  # Flush to get clinic.id without committing
     

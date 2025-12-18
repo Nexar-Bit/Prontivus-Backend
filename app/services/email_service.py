@@ -77,26 +77,38 @@ class EmailService:
             # Port 465 uses SSL, port 587 uses TLS
             import ssl
             
-            # Create SSL context for better compatibility
+            # Create SSL context optimized for GoDaddy/SecureServer
             context = ssl.create_default_context()
-            # Some SMTP servers (like GoDaddy) may require less strict verification
+            # GoDaddy requires less strict verification
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             # Support a wider range of TLS versions for compatibility
             context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
             context.maximum_version = ssl.TLSVersion.MAXIMUM_SUPPORTED
             
-            # Use longer timeout for GoDaddy and other servers that may be slower
-            timeout = 60
+            # Use longer timeout for GoDaddy servers (they can be slow)
+            timeout = 120  # Increased from 60 to 120 seconds
             
             # Port 465 and 3535 use SSL, others use TLS
             if self.smtp_port == 465 or self.smtp_port == 3535:
-                # Use SSL for ports 465 and 3535 (GoDaddy alternative SSL port)
-                with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, context=context, timeout=timeout) as server:
-                    server.login(self.smtp_user, self.smtp_password)
-                    server.send_message(msg)
+                # Use SSL for ports 465 and 3535 (GoDaddy SSL ports)
+                # For GoDaddy, we need to connect without SSL first, then upgrade
+                logger.info(f"Connecting to {self.smtp_host}:{self.smtp_port} using SSL...")
+                try:
+                    # Try direct SSL connection first
+                    with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, context=context, timeout=timeout) as server:
+                        server.login(self.smtp_user, self.smtp_password)
+                        server.send_message(msg)
+                except (ssl.SSLError, OSError) as ssl_error:
+                    # If SSL fails, try connecting without SSL first, then upgrading
+                    logger.warning(f"Direct SSL connection failed: {ssl_error}. Trying alternative method...")
+                    with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=timeout) as server:
+                        server.starttls(context=context)
+                        server.login(self.smtp_user, self.smtp_password)
+                        server.send_message(msg)
             else:
                 # Use TLS for port 587 and others (25, 80, etc.)
+                logger.info(f"Connecting to {self.smtp_host}:{self.smtp_port} using TLS...")
                 with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=timeout) as server:
                     server.starttls(context=context)
                     server.login(self.smtp_user, self.smtp_password)
