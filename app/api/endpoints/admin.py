@@ -7,7 +7,6 @@ from typing import List, Optional
 import secrets
 import string
 import os
-import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,8 +33,6 @@ from app.schemas.system_log import (
     SystemLogCreate, SystemLogUpdate, SystemLogResponse,
 )
 from app.services.email_service import email_service
-
-logger = logging.getLogger(__name__)
 
 
 def generate_secure_password(length: int = 12) -> str:
@@ -761,13 +758,11 @@ async def create_clinic(
     
     # Send credentials email to clinic email (or admin email as fallback)
     recipient_email = clinic.email or admin_email
-    logger.info(f"Attempting to send clinic admin credentials email. Recipient: {recipient_email}, Email service enabled: {email_service.is_enabled()}")
     if recipient_email:
         try:
             # Get the frontend URL from environment or use default
             frontend_url = os.getenv("FRONTEND_URL", "https://prontivus-frontend-p2rr.vercel.app")
             login_url = f"{frontend_url}/portal/login"
-            logger.info(f"Preparing email with login URL: {login_url}")
             
             # Professional HTML email with credentials
             html_body = f"""
@@ -859,12 +854,10 @@ async def create_clinic(
             if email_sent:
                 logger.info(f"Clinic admin credentials email sent successfully to {recipient_email}")
             else:
-                logger.warning(f"Failed to send clinic admin credentials email to {recipient_email} - email service returned False")
+                logger.warning(f"Failed to send clinic admin credentials email to {recipient_email}")
         except Exception as e:
             # Don't fail clinic creation if email sending fails, but log the error
-            logger.exception(f"Exception occurred while sending clinic admin credentials email to {recipient_email}: {str(e)}")
-    else:
-        logger.warning(f"No recipient email available for clinic {clinic.id}. Clinic email: {clinic.email}, Admin email: {admin_email}")
+            logger.exception(f"Failed to send clinic admin credentials email to {recipient_email}: {str(e)}")
     
     # Log the creation
     try:
