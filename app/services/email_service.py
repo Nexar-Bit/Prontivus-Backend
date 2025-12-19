@@ -17,11 +17,11 @@ class EmailService:
     """Service for sending email notifications"""
     
     def __init__(self):
-        self.smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+        self.smtp_host = os.getenv("SMTP_HOST", "smtpout.secureserver.net")
         self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
         self.smtp_user = os.getenv("SMTP_USER", "")
         self.smtp_password = os.getenv("SMTP_PASSWORD", "")
-        self.smtp_from_email = os.getenv("SMTP_FROM_EMAIL", "noreply@prontivus.com")
+        self.smtp_from_email = os.getenv("SMTP_FROM_EMAIL", "suporte@prontivus.com")
         self.enabled = bool(self.smtp_user and self.smtp_password)
         
         if not self.enabled:
@@ -110,7 +110,9 @@ class EmailService:
                 # Use TLS for port 587 and others (25, 80, etc.)
                 logger.info(f"Connecting to {self.smtp_host}:{self.smtp_port} using TLS...")
                 with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=timeout) as server:
-                    server.starttls(context=context)
+                    server.ehlo()  # Identify client to server
+                    server.starttls(context=context)  # Upgrade to TLS
+                    server.ehlo()  # Re-identify after TLS upgrade
                     server.login(self.smtp_user, self.smtp_password)
                     server.send_message(msg)
             

@@ -37,11 +37,11 @@ class Settings(BaseSettings):
     PORT: int = 8000
     
     # Email Settings (optional)
-    SMTP_HOST: Optional[str] = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_HOST: Optional[str] = os.getenv("SMTP_HOST", "smtpout.secureserver.net")
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
     SMTP_USER: Optional[str] = os.getenv("SMTP_USER", None)
     SMTP_PASSWORD: Optional[str] = os.getenv("SMTP_PASSWORD", None)
-    SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", "noreply@prontivus.com")
+    SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", "suporte@prontivus.com")
     
     # Push Notification Settings (optional)
     VAPID_PUBLIC_KEY: Optional[str] = os.getenv("VAPID_PUBLIC_KEY", None)
