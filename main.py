@@ -8,6 +8,17 @@ import uvicorn
 import traceback
 import os
 import json
+import logging
+
+# Configure logging to reduce verbosity
+# Set SQLAlchemy engine logging to WARNING level to reduce query log noise
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+# Keep our application logs at INFO level
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
 # Import API routers
 from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback

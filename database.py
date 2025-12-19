@@ -7,6 +7,14 @@ import logging
 
 load_dotenv()
 
+# Configure SQLAlchemy logging to reduce verbosity
+# Only show WARNING and above in production, INFO in development
+sqlalchemy_logger = logging.getLogger("sqlalchemy.engine")
+if os.getenv("ENVIRONMENT", "development") == "production":
+    sqlalchemy_logger.setLevel(logging.WARNING)
+else:
+    sqlalchemy_logger.setLevel(logging.WARNING)  # Even in dev, reduce noise
+
 # Get database URL from environment variable
 # CRITICAL: Never hardcode production credentials. Always use environment variables.
 # Default now targets PostgreSQL with asyncpg for local development

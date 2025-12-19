@@ -231,10 +231,14 @@ async def get_current_user(
     import logging
     logger = logging.getLogger(__name__)
     
-    # Simplified query: Don't use selectinload - let SQLAlchemy lazy load clinic if needed
-    # This reduces query complexity and should be faster
-    # User.id is primary key with index, so this should be very fast
-    query = select(User).where(User.id == user_id)
+    # Optimized query: Use selectinload for relationships to prevent N+1 queries
+    # This loads clinic, user_role, and settings in a single query instead of multiple queries
+    from sqlalchemy.orm import selectinload
+    query = select(User).options(
+        selectinload(User.clinic),
+        selectinload(User.user_role),
+        selectinload(User.settings)  # Eagerly load user_settings to prevent N+1 queries
+    ).where(User.id == user_id)
     
     try:
         # Increased timeout to 10 seconds for PostgreSQL RDS (network latency + connection pool wait)
@@ -242,14 +246,7 @@ async def get_current_user(
         async def fetch_user():
             result = await db.execute(query)
             user = result.scalar_one_or_none()
-            # Access clinic relationship to trigger lazy load (if needed)
-            # This is done after getting the user to avoid blocking
-            if user and user.clinic_id:
-                try:
-                    # Trigger lazy load with a short timeout
-                    _ = user.clinic  # This will lazy load if not already loaded
-                except Exception as e:
-                    logger.warning(f"Could not load clinic for user {user_id}: {e}")
+            # Relationships are already loaded via selectinload, no need for lazy loading
             return user
         
         # Increased timeout to 30 seconds to match frontend timeout
