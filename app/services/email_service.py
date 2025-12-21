@@ -1,6 +1,6 @@
 """
 Email Service
-Handles sending email notifications to users
+Handles sending email notifications to  users
 """
 import smtplib
 import os
