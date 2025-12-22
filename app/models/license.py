@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Optional, Dict, Any, List
 from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, JSON, Enum as SQLEnum, Boolean
 from sqlalchemy import CHAR
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -35,8 +36,16 @@ class License(Base):
     
     __tablename__ = "licenses"
     
-    # Primary key (using CHAR(36) for MySQL compatibility)
-    id = Column(CHAR(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    # Primary key (UUID for PostgreSQL, CHAR(36) fallback for MySQL)
+    # PostgreSQL uses native UUID type, MySQL uses CHAR(36)
+    id = Column(
+        PostgresUUID(as_uuid=True), 
+        primary_key=True, 
+        default=uuid.uuid4, 
+        index=True,
+        # Fallback to CHAR(36) for MySQL compatibility if needed
+        # For PostgreSQL, this will use UUID type
+    )
     
     # Tenant relationship (Clinic uses integer PK)
     tenant_id = Column(Integer, ForeignKey("clinics.id"), nullable=False, index=True)
@@ -59,8 +68,14 @@ class License(Base):
     # License status
     status = Column(SQLEnum(LicenseStatus), nullable=False, default=LicenseStatus.ACTIVE)
     
-    # Security (using CHAR(36) for MySQL compatibility)
-    activation_key = Column(CHAR(36), nullable=False, default=lambda: str(uuid.uuid4()), unique=True, index=True)
+    # Security (UUID for PostgreSQL, CHAR(36) fallback for MySQL)
+    activation_key = Column(
+        PostgresUUID(as_uuid=True),
+        nullable=False, 
+        default=uuid.uuid4, 
+        unique=True, 
+        index=True
+    )
     signature = Column(Text, nullable=True)  # RSA/ECDSA signature for license validation
     
     # Timestamps

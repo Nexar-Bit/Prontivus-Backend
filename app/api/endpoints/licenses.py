@@ -164,6 +164,9 @@ async def create_license(body: LicenseCreate, db: AsyncSession = Depends(get_db)
         await db.flush()  # Flush to get license.id and activation_key without committing
         await db.refresh(license_obj)
         
+        # Sync users_limit to clinic's max_users
+        clinic.max_users = license_obj.users_limit
+        
         # Note: get_db dependency will commit automatically at the end of the function
         # But we need to ensure the license is persisted before returning
         # The flush() above ensures the license gets an ID, and the commit will happen
@@ -509,6 +512,15 @@ async def update_license(
                 "end_at": int(license_obj.end_at.replace(tzinfo=timezone.utc).timestamp()),
             }
             license_obj.signature = _sign_payload(payload)
+        
+        # Sync users_limit to clinic's max_users if users_limit was updated
+        if 'users_limit' in update_data:
+            clinic_query = await db.execute(
+                select(Clinic).where(Clinic.id == license_obj.tenant_id)
+            )
+            clinic = clinic_query.scalar_one_or_none()
+            if clinic:
+                clinic.max_users = license_obj.users_limit
         
         await db.commit()
         await db.refresh(license_obj)
