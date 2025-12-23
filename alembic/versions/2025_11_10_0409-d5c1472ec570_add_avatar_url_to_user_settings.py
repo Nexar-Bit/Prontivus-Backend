@@ -20,15 +20,22 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # Add avatar_url column to user_settings table if it doesn't exist
+    # First check if table exists
     op.execute("""
         DO $$ BEGIN
-            IF NOT EXISTS (
-                SELECT FROM information_schema.columns 
+            IF EXISTS (
+                SELECT FROM information_schema.tables 
                 WHERE table_schema = 'public' 
-                AND table_name = 'user_settings' 
-                AND column_name = 'avatar_url'
+                AND table_name = 'user_settings'
             ) THEN
-                ALTER TABLE user_settings ADD COLUMN avatar_url VARCHAR(500);
+                IF NOT EXISTS (
+                    SELECT FROM information_schema.columns 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'user_settings' 
+                    AND column_name = 'avatar_url'
+                ) THEN
+                    ALTER TABLE user_settings ADD COLUMN avatar_url VARCHAR(500);
+                END IF;
             END IF;
         END $$;
     """)
