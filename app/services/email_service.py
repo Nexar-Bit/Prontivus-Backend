@@ -39,7 +39,22 @@ class EmailService:
         text_body: Optional[str] = None,
     ) -> bool:
         """
-        Send an email to a recipient
+        Send an email (non-blocking - runs in thread pool to avoid blocking event loop)
+        """
+        import asyncio
+        # Run synchronous SMTP operations in thread pool to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._send_email_sync, to_email, subject, html_body, text_body)
+    
+    def _send_email_sync(
+        self,
+        to_email: str,
+        subject: str,
+        html_body: str,
+        text_body: Optional[str] = None,
+    ) -> bool:
+        """
+        Synchronous email sending (called from thread pool executor to avoid blocking event loop)
         
         Args:
             to_email: Recipient email address

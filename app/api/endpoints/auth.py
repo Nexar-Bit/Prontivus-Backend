@@ -20,6 +20,7 @@ from app.core.auth import (
     hash_password
 )
 from app.models import User, UserRole
+from app.models.menu import UserRole as UserRoleModel
 from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
@@ -31,6 +32,7 @@ from app.schemas.auth import (
     ResetPasswordRequest
 )
 import logging
+import asyncio
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -99,27 +101,125 @@ async def login(
                         detail="Access denied. This login is restricted to patients only."
                     )
         
-        # Get user permissions and role from menu service
+        # PARALLELIZE data loading: load user relationships AND menu data simultaneously
+        # Both operations are independent since we already have role_id from authenticated user
+        menu_service = MenuService(db)
+        
+        # Get role_id from authenticated user (already available, no query needed)
+        role_id = user.role_id
+        
+        # Task 1: Load user with relationships (clinic, user_role)
+        user_query = select(User).options(
+            selectinload(User.clinic),
+            selectinload(User.user_role)
+        ).where(User.id == user.id)
+        
+        async def load_user_relations():
+            """Load user with clinic and user_role relationships"""
+            result = await db.execute(user_query)
+            return result.scalar_one()
+        
+        async def load_menu_data_by_role_id():
+            """Load menu data using role_id (runs in parallel with user relations loading)"""
+            if not role_id:
+                # Fallback: resolve role from enum if role_id not available
+                role_name_map = {
+                    "admin": "SuperAdmin",
+                    "secretary": "Secretaria",
+                    "doctor": "Medico",
+                    "patient": "Paciente"
+                }
+                role_name = role_name_map.get(user.role.value)
+                if not role_name:
+                    return None, set(), []
+                
+                role_query = select(UserRoleModel).where(UserRoleModel.name == role_name)
+                role_result = await db.execute(role_query)
+                resolved_role = role_result.scalar_one_or_none()
+                if not resolved_role or not resolved_role.id:
+                    return None, set(), []
+                resolved_role_id = resolved_role.id
+            else:
+                resolved_role_id = role_id
+                resolved_role = None  # Will fetch it below
+            
+            try:
+                # Check cache first
+                cached_data = menu_service._get_cached_menu_data(resolved_role_id)
+                if cached_data:
+                    menu_items, permissions, menu_structure = cached_data
+                    # Get user_role object if not already resolved
+                    if not resolved_role:
+                        role_query = select(UserRoleModel).where(UserRoleModel.id == resolved_role_id)
+                        role_result = await db.execute(role_query)
+                        resolved_role = role_result.scalar_one_or_none()
+                    return resolved_role, permissions, menu_structure
+                
+                # Get menu items for this role (single query with eager loading)
+                menu_items = await menu_service.get_user_menu_from_role_id(resolved_role_id)
+                permissions = await menu_service.get_user_permissions_from_menu_items(menu_items)
+                menu_structure = await menu_service.get_menu_structure_from_menu_items(menu_items)
+                
+                # Cache the results
+                menu_service._cache_menu_data(resolved_role_id, menu_items, permissions, menu_structure)
+                
+                # Get user_role object if not already resolved
+                if not resolved_role:
+                    role_query = select(UserRoleModel).where(UserRoleModel.id == resolved_role_id)
+                    role_result = await db.execute(role_query)
+                    resolved_role = role_result.scalar_one_or_none()
+                
+                return resolved_role, permissions, menu_structure
+            except Exception as e:
+                logger.error(f"Error loading menu data for role_id {resolved_role_id}: {str(e)}", exc_info=True)
+                return None, set(), []
+        
+        # Execute both tasks in PARALLEL - this is the key optimization!
         try:
-            menu_service = MenuService(db)
-            user_role = await menu_service.get_user_role(user.id)
-            user_permissions = await menu_service.get_user_permissions(user.id)
-            menu_structure = await menu_service.get_menu_structure(user.id)
+            user_with_relations, menu_data_result = await asyncio.gather(
+                load_user_relations(),
+                load_menu_data_by_role_id(),
+                return_exceptions=True
+            )
+            
+            # Handle exceptions
+            if isinstance(user_with_relations, Exception):
+                logger.error(f"Error loading user relations: {str(user_with_relations)}", exc_info=True)
+                raise user_with_relations
+            
+            if isinstance(menu_data_result, Exception):
+                logger.error(f"Error loading menu data: {str(menu_data_result)}", exc_info=True)
+                user_role = None
+                user_permissions = set()
+                menu_structure = []
+            else:
+                user_role, user_permissions, menu_structure = menu_data_result
+                # If menu loading returned None, fallback to user_role from loaded relations
+                if user_role is None:
+                    user_role = user_with_relations.user_role if user_with_relations else None
+                    user_permissions = set()
+                    menu_structure = []
         except Exception as e:
-            logger.error(f"Error getting menu/permissions for user {user.id}: {str(e)}", exc_info=True)
-            # Fallback: use empty permissions and menu if menu service fails
-            user_role = None
-            user_permissions = set()
-            menu_structure = []
+            logger.error(f"Error in parallel data loading for user {user.id}: {str(e)}", exc_info=True)
+            # Fallback: load sequentially if parallel loading fails
+            result = await db.execute(user_query)
+            user_with_relations = result.scalar_one()
+            try:
+                user_role, user_permissions, menu_structure = await menu_service.get_user_menu_data_optimized(user_with_relations)
+            except Exception as menu_error:
+                logger.error(f"Error getting menu/permissions: {str(menu_error)}", exc_info=True)
+                user_role = None
+                user_permissions = set()
+                menu_structure = []
         
         # Create token data with permissions
         token_data = {
-            "user_id": user.id,
-            "username": user.username,
-            "role": user.role.value,
-            "role_id": user.role_id,
+            "user_id": user_with_relations.id,
+            "username": user_with_relations.username,
+            "role": user_with_relations.role.value,
+            "role_id": user_with_relations.role_id,
             "role_name": user_role.name if user_role else None,
-            "clinic_id": user.clinic_id,
+            "clinic_id": user_with_relations.clinic_id,
             "permissions": list(user_permissions)  # Convert set to list for JSON serialization
         }
         
@@ -127,10 +227,8 @@ async def login(
         access_token = create_access_token(data=token_data)
         refresh_token = create_refresh_token(data=token_data)
         
-        # Load clinic information
-        query = select(User).options(selectinload(User.clinic)).where(User.id == user.id)
-        result = await db.execute(query)
-        user_with_clinic = result.scalar_one()
+        # Use user_with_relations which already has clinic loaded
+        user_with_clinic = user_with_relations
         
         # Prepare user response with role information
         user_dict = {
