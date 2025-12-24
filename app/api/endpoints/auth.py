@@ -255,8 +255,7 @@ async def login(
             
             # Send alert in background (don't await)
             # Don't pass db session - let it create its own to avoid session state issues
-            # Use asyncio.create_task to run in background
-            import asyncio
+            # Use asyncio.create_task to run in background (asyncio imported at module level)
             asyncio.create_task(send_login_alert(
                 user_id=user.id,
                 login_ip=client_ip,
@@ -903,7 +902,6 @@ async def google_callback(
             try:
                 client_ip = request.client.host if request.client else None
                 user_agent = request.headers.get("user-agent")
-                import asyncio
                 asyncio.create_task(send_login_alert(
                     user_id=user.id,
                     login_ip=client_ip,
