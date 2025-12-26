@@ -36,17 +36,23 @@ from app.core.cache import cache_manager
 def get_cors_origins():
     """Get CORS origins from environment variable or use defaults"""
     cors_env = os.getenv("BACKEND_CORS_ORIGINS", "")
+    origins = []
     if cors_env:
         # Split by comma and strip whitespace
-        origins = [origin.strip() for origin in cors_env.split(",")]
-        return origins
-    # Default origins for development
-    return [
+        origins = [origin.strip() for origin in cors_env.split(",") if origin.strip()]
+    
+    # Always add localhost origins for development (even in production for local testing)
+    default_origins = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",  # Next.js dev server sometimes uses 3001
         "http://localhost:8081",  # Expo/Metro bundler for mobile web
+        "http://127.0.0.1:8081",  # Alternative localhost format
     ]
+    
+    # Merge and deduplicate
+    all_origins = list(set(origins + default_origins))
+    return all_origins
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -85,9 +91,10 @@ app.add_middleware(
     # In production, explicit origins should be set via BACKEND_CORS_ORIGINS
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
     allow_headers=["*"],
     expose_headers=["Authorization", "X-Request-Id"],
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
 # Add cache headers middleware for browser caching (after CORS, before security)
@@ -119,10 +126,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     if origin:
         if origin in allowed_origins:
             is_allowed = True
-        elif os.getenv("ENVIRONMENT") == "development":
-            # In development, allow localhost origins
-            if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
-                is_allowed = True
+        # Always allow localhost origins (for both dev and production local testing)
+        elif origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:") or origin.startswith("http://0.0.0.0:"):
+            is_allowed = True
     
     if is_allowed:
         headers = {
@@ -155,10 +161,9 @@ async def global_exception_handler(request: Request, exc: Exception):
     if origin:
         if origin in allowed_origins:
             is_allowed = True
-        elif os.getenv("ENVIRONMENT") == "development":
-            # In development, allow localhost origins
-            if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
-                is_allowed = True
+        # Always allow localhost origins (for both dev and production local testing)
+        elif origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:") or origin.startswith("http://0.0.0.0:"):
+            is_allowed = True
     
     if is_allowed:
         headers = {
@@ -207,10 +212,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     if origin:
         if origin in allowed_origins:
             is_allowed = True
-        elif os.getenv("ENVIRONMENT") == "development":
-            # In development, allow localhost origins
-            if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
-                is_allowed = True
+        # Always allow localhost origins (for both dev and production local testing)
+        elif origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:") or origin.startswith("http://0.0.0.0:"):
+            is_allowed = True
     
     if is_allowed:
         headers = {
