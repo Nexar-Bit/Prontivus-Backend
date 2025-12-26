@@ -45,6 +45,7 @@ def get_cors_origins():
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",  # Next.js dev server sometimes uses 3001
+        "http://localhost:8081",  # Expo/Metro bundler for mobile web
     ]
 
 @asynccontextmanager
@@ -80,7 +81,9 @@ cors_origins = get_cors_origins()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+" if os.getenv("ENVIRONMENT", "development") == "development" else None,
+    # Always allow localhost origins for development (mobile web, etc.)
+    # In production, explicit origins should be set via BACKEND_CORS_ORIGINS
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
