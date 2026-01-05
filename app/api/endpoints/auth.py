@@ -174,43 +174,30 @@ async def login(
                 logger.error(f"Error loading menu data for role_id {resolved_role_id}: {str(e)}", exc_info=True)
                 return None, set(), []
         
-        # Execute both tasks in PARALLEL - this is the key optimization!
-        try:
-            user_with_relations, menu_data_result = await asyncio.gather(
-                load_user_relations(),
-                load_menu_data_by_role_id(),
-                return_exceptions=True
-            )
-            
-            # Handle exceptions
-            if isinstance(user_with_relations, Exception):
-                logger.error(f"Error loading user relations: {str(user_with_relations)}", exc_info=True)
-                raise user_with_relations
-            
-            if isinstance(menu_data_result, Exception):
-                logger.error(f"Error loading menu data: {str(menu_data_result)}", exc_info=True)
-                user_role = None
-                user_permissions = set()
-                menu_structure = []
-            else:
-                user_role, user_permissions, menu_structure = menu_data_result
-                # If menu loading returned None, fallback to user_role from loaded relations
-                if user_role is None:
-                    user_role = user_with_relations.user_role if user_with_relations else None
-                    user_permissions = set()
-                    menu_structure = []
-        except Exception as e:
-            logger.error(f"Error in parallel data loading for user {user.id}: {str(e)}", exc_info=True)
-            # Fallback: load sequentially if parallel loading fails
-            result = await db.execute(user_query)
-            user_with_relations = result.scalar_one()
-            try:
-                user_role, user_permissions, menu_structure = await menu_service.get_user_menu_data_optimized(user_with_relations)
-            except Exception as menu_error:
-                logger.error(f"Error getting menu/permissions: {str(menu_error)}", exc_info=True)
-                user_role = None
-                user_permissions = set()
-                menu_structure = []
+        # Execute both tasks in PARALLEL - ALWAYS use parallel mode, never sequential
+        # Using return_exceptions=True ensures exceptions are returned as values, not raised
+        user_with_relations, menu_data_result = await asyncio.gather(
+            load_user_relations(),
+            load_menu_data_by_role_id(),
+            return_exceptions=True
+        )
+
+        # Handle exceptions from parallel tasks
+        if isinstance(user_with_relations, Exception):
+            logger.error(f"Error loading user relations: {str(user_with_relations)}", exc_info=True)
+            raise user_with_relations
+        
+        if isinstance(menu_data_result, Exception):
+            logger.error(f"Error loading menu data: {str(menu_data_result)}", exc_info=True)
+            # If menu loading failed, use minimal defaults (user_role from loaded relations)
+            user_role = user_with_relations.user_role if user_with_relations else None
+            user_permissions = set()
+            menu_structure = []
+        else:
+            user_role, user_permissions, menu_structure = menu_data_result
+            # If menu loading returned None, fallback to user_role from loaded relations
+            if user_role is None:
+                user_role = user_with_relations.user_role if user_with_relations else None
         
         # Create token data with permissions
         token_data = {

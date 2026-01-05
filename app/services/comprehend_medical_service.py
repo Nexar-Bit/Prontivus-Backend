@@ -29,9 +29,10 @@ class ComprehendMedicalService:
     """
     
     def __init__(self):
-        """Initialize AWS Comprehend Medical client"""
+        """Initialize AWS Comprehend Medical and Bedrock clients"""
         self.enabled = False
         self.client = None
+        self.bedrock_client = None
         
         if not COMPREHEND_MEDICAL_AVAILABLE:
             logger.warning("AWS Comprehend Medical not available. Install boto3: pip install boto3")
@@ -44,12 +45,27 @@ class ComprehendMedicalService:
         
         if aws_access_key and aws_secret_key:
             try:
+                # Initialize Comprehend Medical client
                 self.client = boto3.client(
                     'comprehendmedical',
                     aws_access_key_id=aws_access_key,
                     aws_secret_access_key=aws_secret_key,
                     region_name=aws_region
                 )
+                
+                # Initialize Bedrock client for generative AI
+                try:
+                    self.bedrock_client = boto3.client(
+                        'bedrock-runtime',
+                        aws_access_key_id=aws_access_key,
+                        aws_secret_access_key=aws_secret_key,
+                        region_name=aws_region
+                    )
+                    logger.info(f"AWS Bedrock initialized for region: {aws_region}")
+                except Exception as e:
+                    logger.warning(f"AWS Bedrock not available: {str(e)}. ICD suggestions will use database lookup.")
+                    self.bedrock_client = None
+                
                 self.enabled = True
                 logger.info(f"AWS Comprehend Medical initialized for region: {aws_region}")
             except Exception as e:
@@ -431,32 +447,100 @@ class ComprehendMedicalService:
     async def infer_icd10_codes(
         self,
         text: str,
-        language: str = "pt-BR"
+        language: str = "pt-BR",
+        db_session=None
     ) -> Dict[str, Any]:
         """
-        Infer ICD-10 codes from clinical text
+        Infer ICD-10 codes from clinical text using AWS Comprehend Medical + Bedrock
         
-        Note: AWS Comprehend Medical doesn't directly provide ICD-10 codes,
-        but we can use extracted conditions to suggest ICD-10 codes
+        Flow:
+        1. Extract conditions using AWS Comprehend Medical
+        2. Use AWS Bedrock (Generative AI) to suggest ICD-10 codes
+        3. Fallback to database lookup if Bedrock is not available
         
         Args:
             text: Clinical text
             language: Language code
+            db_session: Optional database session for ICD-10 lookup
         
         Returns:
             Dictionary with suggested ICD-10 codes based on conditions
         """
+        if not self.is_enabled():
+            return {
+                "success": False,
+                "error": "AWS Comprehend Medical not enabled",
+                "icd10_suggestions": []
+            }
+        
+        # Step 1: Extract conditions using AWS Comprehend Medical
         conditions_result = await self.extract_conditions(text, language)
         
         if not conditions_result["success"]:
             return conditions_result
         
-        # Map conditions to ICD-10 codes (simplified - in production, use database)
+        if not conditions_result.get("conditions"):
+            return {
+                "success": True,
+                "icd10_suggestions": [],
+                "count": 0,
+                "message": "No medical conditions found in text"
+            }
+        
+        # Step 2: Use AWS Bedrock to suggest ICD-10 codes
         icd10_suggestions = []
-        for condition in conditions_result["conditions"]:
-            condition_text = condition.get("text", "").lower()
-            
-            # Simple mapping (should be replaced with database lookup)
+        
+        if self.bedrock_client:
+            try:
+                # Use Bedrock to generate ICD-10 code suggestions
+                bedrock_suggestions = await self._bedrock_suggest_icd10(
+                    conditions_result["conditions"],
+                    text,
+                    language
+                )
+                icd10_suggestions.extend(bedrock_suggestions)
+            except Exception as e:
+                logger.warning(f"AWS Bedrock ICD-10 suggestion failed: {str(e)}. Using database lookup.")
+        
+        # Step 3: Fallback to database lookup if Bedrock suggestions are insufficient
+        if len(icd10_suggestions) < len(conditions_result["conditions"]) and db_session:
+            try:
+                from app.models.icd10 import ICD10SearchIndex
+                from sqlalchemy import select
+                from app.services.icd10_import import normalize_text
+                
+                for condition in conditions_result["conditions"]:
+                    condition_text = condition.get("text", "")
+                    
+                    # Check if we already have a suggestion for this condition
+                    existing = next(
+                        (s for s in icd10_suggestions if s.get("condition", "").lower() == condition_text.lower()),
+                        None
+                    )
+                    if existing:
+                        continue
+                    
+                    # Search ICD-10 database
+                    normalized = normalize_text(condition_text)
+                    query = select(ICD10SearchIndex).filter(
+                        ICD10SearchIndex.search_text.ilike(f"%{normalized}%")
+                    ).limit(3)
+                    
+                    results = (await db_session.execute(query)).scalars().all()
+                    
+                    for result in results:
+                        icd10_suggestions.append({
+                            "icd10_code": result.code,
+                            "condition": condition_text,
+                            "description": result.description,
+                            "confidence": condition.get("confidence", 0.7) * 0.9,  # Slightly lower confidence for DB lookup
+                            "source": "database"
+                        })
+            except Exception as e:
+                logger.warning(f"Database ICD-10 lookup failed: {str(e)}")
+        
+        # If no suggestions found, use simple mapping as last resort
+        if not icd10_suggestions:
             icd10_mapping = {
                 "hipertensão": "I10",
                 "diabetes": "E11",
@@ -467,20 +551,132 @@ class ComprehendMedicalService:
                 "dispneia": "R06",
             }
             
-            for key, code in icd10_mapping.items():
-                if key in condition_text:
-                    icd10_suggestions.append({
-                        "icd10_code": code,
-                        "condition": condition.get("text"),
-                        "confidence": condition.get("confidence", 0.0)
-                    })
-                    break
+            for condition in conditions_result["conditions"]:
+                condition_text = condition.get("text", "").lower()
+                for key, code in icd10_mapping.items():
+                    if key in condition_text:
+                        icd10_suggestions.append({
+                            "icd10_code": code,
+                            "condition": condition.get("text"),
+                            "confidence": condition.get("confidence", 0.6),
+                            "source": "fallback"
+                        })
+                        break
         
         return {
             "success": True,
             "icd10_suggestions": icd10_suggestions,
-            "count": len(icd10_suggestions)
+            "count": len(icd10_suggestions),
+            "conditions_analyzed": len(conditions_result["conditions"])
         }
+    
+    async def _bedrock_suggest_icd10(
+        self,
+        conditions: List[Dict[str, Any]],
+        original_text: str,
+        language: str = "pt-BR"
+    ) -> List[Dict[str, Any]]:
+        """
+        Use AWS Bedrock (Generative AI) to suggest ICD-10 codes for medical conditions
+        
+        Args:
+            conditions: List of conditions extracted by Comprehend Medical
+            original_text: Original clinical text
+            language: Language code
+        
+        Returns:
+            List of ICD-10 suggestions with codes and descriptions
+        """
+        if not self.bedrock_client:
+            return []
+        
+        try:
+            # Prepare prompt for Bedrock
+            conditions_text = "\n".join([
+                f"- {c.get('text', '')} (Type: {c.get('type', 'UNKNOWN')}, Confidence: {c.get('confidence', 0.0):.2f})"
+                for c in conditions
+            ])
+            
+            prompt = f"""You are a medical coding expert. Based on the following medical conditions extracted from a clinical note, suggest the most appropriate ICD-10 codes.
+
+Clinical Text Context:
+{original_text[:500]}
+
+Extracted Medical Conditions:
+{conditions_text}
+
+For each condition, provide:
+1. The most appropriate ICD-10 code
+2. A brief description of why this code matches
+3. Confidence level (0.0-1.0)
+
+Return a JSON array with this structure:
+[
+  {{
+    "icd10_code": "I10",
+    "condition": "condition text",
+    "description": "ICD-10 description",
+    "confidence": 0.95,
+    "reasoning": "Brief explanation"
+  }}
+]
+
+Only return the JSON array, no additional text."""
+
+            # Use Claude model via Bedrock (or other available model)
+            model_id = os.getenv("AWS_BEDROCK_MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
+            
+            # Prepare request body for Claude
+            import json
+            request_body = {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 2000,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            }
+            
+            # Invoke Bedrock
+            response = self.bedrock_client.invoke_model(
+                modelId=model_id,
+                body=json.dumps(request_body)
+            )
+            
+            # Parse response
+            response_body = json.loads(response['body'].read())
+            content = response_body.get('content', [])
+            
+            if content and len(content) > 0:
+                ai_response = content[0].get('text', '')
+                
+                # Extract JSON from response
+                import re
+                json_match = re.search(r'\[.*\]', ai_response, re.DOTALL)
+                if json_match:
+                    suggestions = json.loads(json_match.group())
+                    
+                    # Format suggestions
+                    formatted_suggestions = []
+                    for suggestion in suggestions:
+                        formatted_suggestions.append({
+                            "icd10_code": suggestion.get("icd10_code", ""),
+                            "condition": suggestion.get("condition", ""),
+                            "description": suggestion.get("description", ""),
+                            "confidence": float(suggestion.get("confidence", 0.8)),
+                            "reasoning": suggestion.get("reasoning", ""),
+                            "source": "bedrock"
+                        })
+                    
+                    return formatted_suggestions
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error in Bedrock ICD-10 suggestion: {str(e)}", exc_info=True)
+            return []
 
 
 # Global instance

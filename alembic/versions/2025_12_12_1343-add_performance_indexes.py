@@ -23,63 +23,39 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Add indexes to improve query performance"""
-    from sqlalchemy import inspect, text
+    from sqlalchemy import text
     conn = op.get_bind()
     
-    def create_index_if_not_exists(table_name: str, index_name: str, columns: list):
-        """Create index only if it doesn't exist"""
+    # Indexes to create (table_name, index_name, columns)
+    # Note: Using correct column names from models
+    indexes = [
+        ('users', 'idx_users_is_active', ['is_active']),
+        ('patients', 'idx_patients_is_active', ['is_active']),
+        ('patients', 'idx_patients_created_at', ['created_at']),
+        ('clinical_records', 'idx_clinical_records_created_at', ['created_at']),
+        ('invoices', 'idx_invoices_issue_date', ['issue_date']),
+        ('invoices', 'idx_invoices_status', ['status']),
+        # Payments table uses 'paid_at', not 'payment_date'
+        ('payments', 'idx_payments_paid_at', ['paid_at']),
+        ('stock_movements', 'idx_stock_movements_timestamp', ['timestamp']),
+        ('stock_movements', 'idx_stock_movements_clinic_id', ['clinic_id']),
+        ('products', 'idx_products_is_active', ['is_active']),
+    ]
+    
+    for table_name, index_name, columns in indexes:
         try:
-            # Check if index exists using raw SQL
-            result = conn.execute(text(f"""
-                SELECT COUNT(*) as count
-                FROM information_schema.statistics
-                WHERE table_schema = DATABASE()
-                AND table_name = '{table_name}'
-                AND index_name = '{index_name}'
+            # Use CREATE INDEX IF NOT EXISTS with raw SQL (PostgreSQL 9.5+)
+            columns_str = ', '.join(columns)
+            conn.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS {index_name} 
+                ON {table_name} ({columns_str})
             """))
-            exists = result.scalar() > 0
-            
-            if not exists:
-                op.create_index(index_name, table_name, columns)
-                print(f"Created index {index_name} on {table_name}")
-            else:
-                print(f"Index {index_name} on {table_name} already exists, skipping")
+            print(f"Created index {index_name} on {table_name}")
         except Exception as e:
-            # If index creation fails, try to create it anyway (might be a different error)
-            try:
-                op.create_index(index_name, table_name, columns)
-                print(f"Created index {index_name} on {table_name} (after error check)")
-            except Exception as e2:
-                print(f"Could not create index {index_name} on {table_name}: {e2}")
-    
-    # Users table indexes
-    create_index_if_not_exists('users', 'idx_users_is_active', ['is_active'])
-    
-    # Patients table indexes
-    create_index_if_not_exists('patients', 'idx_patients_is_active', ['is_active'])
-    create_index_if_not_exists('patients', 'idx_patients_created_at', ['created_at'])
-    
-    # Clinical records table indexes
-    # Note: clinical_records doesn't have clinic_id or patient_id directly
-    # It has appointment_id which links to appointments (which have clinic_id and patient_id)
-    create_index_if_not_exists('clinical_records', 'idx_clinical_records_created_at', ['created_at'])
-    
-    # Invoices table indexes
-    # Note: invoices doesn't have clinic_id directly, but has appointment_id and patient_id
-    create_index_if_not_exists('invoices', 'idx_invoices_issue_date', ['issue_date'])
-    create_index_if_not_exists('invoices', 'idx_invoices_status', ['status'])
-    
-    # Payments table indexes
-    create_index_if_not_exists('payments', 'idx_payments_payment_date', ['payment_date'])
-    # Note: payments.status is JSON, cannot be indexed directly
-    
-    # Stock movements table indexes
-    # Note: uses 'timestamp' not 'movement_date', and has clinic_id
-    create_index_if_not_exists('stock_movements', 'idx_stock_movements_timestamp', ['timestamp'])
-    create_index_if_not_exists('stock_movements', 'idx_stock_movements_clinic_id', ['clinic_id'])
-    
-    # Products table indexes
-    create_index_if_not_exists('products', 'idx_products_is_active', ['is_active'])
+            # If table/column doesn't exist, skip silently
+            print(f"Skipping index {index_name} on {table_name}: {e}")
+            # Don't commit on error - let Alembic handle transaction
+            continue
 
 
 def downgrade() -> None:

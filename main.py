@@ -9,6 +9,11 @@ import traceback
 import os
 import json
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables from .env file FIRST, before any other imports
+# This ensures all modules that use os.getenv() will get values from .env
+load_dotenv()
 
 # Configure logging to reduce verbosity
 # Set SQLAlchemy engine logging to WARNING level to reduce query log noise
@@ -21,7 +26,16 @@ logging.basicConfig(
 )
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback, document_signature, telemetry, online_payment
+from app.api.endpoints.tiss import (
+    consultation_router, 
+    sadt_router,
+    hospitalization_router,
+    individual_fee_router,
+    batch_router, 
+    tuss_router, 
+    submission_router
+)
 from app.api.endpoints import icd10
 
 # Import security middleware
@@ -279,9 +293,18 @@ app.include_router(clinical.router, prefix=API_V1_PREFIX, tags=["Clinical"])
 app.include_router(appointments.router, prefix=API_V1_PREFIX, tags=["Appointments"])
 app.include_router(users.router, prefix=API_V1_PREFIX, tags=["Users"])
 app.include_router(financial.router, prefix=f"{API_V1_PREFIX}/financial", tags=["Financial"])
-app.include_router(tiss.router, prefix=API_V1_PREFIX, tags=["TISS"])
+# Legacy TISS endpoints - deprecated, use new TISS module endpoints instead
+# app.include_router(tiss.router, prefix=API_V1_PREFIX, tags=["TISS"])
 app.include_router(tiss_templates.router, prefix=f"{API_V1_PREFIX}/financial", tags=["TISS Templates"])
-app.include_router(tiss_batch.router, prefix=API_V1_PREFIX, tags=["TISS Batch"])
+# app.include_router(tiss_batch.router, prefix=API_V1_PREFIX, tags=["TISS Batch"])
+# New TISS module endpoints
+app.include_router(consultation_router, prefix=API_V1_PREFIX)
+app.include_router(sadt_router, prefix=API_V1_PREFIX)
+app.include_router(hospitalization_router, prefix=API_V1_PREFIX)
+app.include_router(individual_fee_router, prefix=API_V1_PREFIX)
+app.include_router(batch_router, prefix=API_V1_PREFIX)
+app.include_router(tuss_router, prefix=API_V1_PREFIX)
+app.include_router(submission_router, prefix=API_V1_PREFIX)
 app.include_router(stock.router, prefix=API_V1_PREFIX, tags=["Stock"])
 app.include_router(procedures.router, prefix=API_V1_PREFIX, tags=["Procedures"])
 app.include_router(analytics.router, prefix=API_V1_PREFIX, tags=["Analytics"])
@@ -310,6 +333,9 @@ app.include_router(payment_methods.router, prefix=API_V1_PREFIX, tags=["Payment 
 app.include_router(report_config.router, prefix=API_V1_PREFIX, tags=["Report Config"])
 app.include_router(support.router, prefix=API_V1_PREFIX, tags=["Support"])
 app.include_router(documents.router, prefix=API_V1_PREFIX, tags=["Documents"])
+app.include_router(document_signature.router, prefix=API_V1_PREFIX, tags=["Document Signatures"])
+app.include_router(telemetry.router, prefix=API_V1_PREFIX, tags=["Telemetry"])
+app.include_router(online_payment.router, prefix=API_V1_PREFIX, tags=["Online Payments"])
 app.include_router(ai_diagnosis.router, prefix=API_V1_PREFIX, tags=["AI Diagnosis"])
 app.include_router(feedback.router, prefix=API_V1_PREFIX, tags=["Feedback"])
 
@@ -321,9 +347,10 @@ app.include_router(clinical.router, prefix="/api", tags=["Clinical (Legacy)"], d
 app.include_router(appointments.router, prefix="/api", tags=["Appointments (Legacy)"], deprecated=True)
 app.include_router(users.router, prefix="/api", tags=["Users (Legacy)"], deprecated=True)
 app.include_router(financial.router, prefix="/api/financial", tags=["Financial (Legacy)"], deprecated=True)
-app.include_router(tiss.router, prefix="/api", tags=["TISS (Legacy)"], deprecated=True)
+# Legacy TISS endpoints - commented out as they use old models
+# app.include_router(tiss.router, prefix="/api", tags=["TISS (Legacy)"], deprecated=True)
 app.include_router(tiss_templates.router, prefix="/api/financial", tags=["TISS Templates (Legacy)"], deprecated=True)
-app.include_router(tiss_batch.router, prefix="/api", tags=["TISS Batch (Legacy)"], deprecated=True)
+# app.include_router(tiss_batch.router, prefix="/api", tags=["TISS Batch (Legacy)"], deprecated=True)
 app.include_router(stock.router, prefix="/api", tags=["Stock (Legacy)"], deprecated=True)
 app.include_router(procedures.router, prefix="/api", tags=["Procedures (Legacy)"], deprecated=True)
 app.include_router(analytics.router, prefix="/api", tags=["Analytics (Legacy)"], deprecated=True)

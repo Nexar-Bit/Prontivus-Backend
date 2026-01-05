@@ -484,18 +484,23 @@ async def transcribe_audio(
     language: str = Form('pt-BR'),
     enhance_medical_terms: bool = Form(True),
     structure_soap: bool = Form(False),
-    current_user: User = Depends(get_current_user)
+    appointment_id: Optional[int] = Form(None),  # Optional appointment ID for patient recordings
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
 ):
     """
     Direct audio transcription endpoint
     Transcribes audio to text without full voice processing pipeline
+    Available for both doctors and patients
     
     Args:
         audio_file: Audio file (WAV, MP3, WebM, etc.)
         language: Language code (default: pt-BR)
         enhance_medical_terms: Whether to enhance medical terminology
         structure_soap: Whether to structure text into SOAP format
+        appointment_id: Optional appointment ID (required for patients to link recording to appointment)
         current_user: Current authenticated user
+        db: Database session
     
     Returns:
         Transcription result with raw text, enhanced text, and optional SOAP structure
@@ -517,6 +522,45 @@ async def transcribe_audio(
                 detail="Audio file is empty"
             )
         
+        # If appointment_id is provided, verify user has access to the appointment
+        if appointment_id:
+            appointment_query = select(Appointment).where(Appointment.id == appointment_id)
+            appointment_result = await db.execute(appointment_query)
+            appointment = appointment_result.scalar_one_or_none()
+            
+            if not appointment:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Appointment not found"
+                )
+            
+            # Verify access: doctor owns appointment OR patient belongs to appointment
+            if current_user.role == "patient":
+                # For patients, verify they belong to this appointment
+                from app.models import Patient
+                from sqlalchemy import and_
+                patient_query = select(Patient).filter(
+                    and_(
+                        Patient.id == appointment.patient_id,
+                        Patient.email == current_user.email,
+                        Patient.clinic_id == current_user.clinic_id
+                    )
+                )
+                patient_result = await db.execute(patient_query)
+                patient = patient_result.scalar_one_or_none()
+                if not patient:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="You don't have access to this appointment"
+                    )
+            elif current_user.role in ["doctor", "admin"]:
+                # For doctors, verify they own the appointment or are admin
+                if appointment.doctor_id != current_user.id and current_user.role != "admin":
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="You don't have access to this appointment"
+                    )
+        
         # Transcribe
         if not VOICE_TRANSCRIPTION_AVAILABLE or voice_transcriber is None:
             raise HTTPException(
@@ -536,6 +580,30 @@ async def transcribe_audio(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result.get('error', 'Transcription failed')
             )
+        
+        # If appointment_id provided and user is patient, store the transcription for doctor to see
+        if appointment_id and current_user.role == "patient":
+            # Store patient voice recording in VoiceSession for doctor to access
+            try:
+                session_id = str(uuid.uuid4())
+                voice_session = VoiceSession(
+                    session_id=session_id,
+                    user_id=current_user.id,  # Patient user ID
+                    appointment_id=appointment_id,
+                    encrypted_audio_data=b"",  # Audio is not stored, only transcription
+                    expires_at=datetime.utcnow() + timedelta(hours=24)
+                )
+                db.add(voice_session)
+                await db.commit()
+                
+                # Add transcription text to result for doctor reference
+                result['patient_recording'] = True
+                result['appointment_id'] = appointment_id
+                result['session_id'] = session_id
+                logger.info(f"Patient voice recording stored for appointment {appointment_id}")
+            except Exception as e:
+                logger.warning(f"Failed to store patient voice recording: {e}")
+                # Don't fail the transcription if storage fails
         
         return result
         

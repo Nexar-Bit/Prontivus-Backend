@@ -1,0 +1,283 @@
+"""
+TISS Consultation Form Service
+Handles consultation guide form creation, validation, and XML generation
+"""
+
+import logging
+from typing import Dict, Optional, List
+from datetime import date, datetime
+from decimal import Decimal
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+import hashlib
+import json
+
+from app.models.tiss.consultation import TISSConsultationGuide
+from app.models.tiss.audit_log import TISSAuditLog
+from app.models import Invoice, Appointment, Patient, Clinic, User
+from app.services.tiss.versioning import TISSVersioningService
+from app.services.tiss.tuss_service import TUSSService
+
+logger = logging.getLogger(__name__)
+
+
+class ConsultationFormService:
+    """Service for managing consultation guides"""
+    
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.versioning = TISSVersioningService(db)
+        self.tuss_service = TUSSService(db)
+    
+    async def create_consultation_guide(
+        self,
+        invoice_id: int,
+        clinic_id: int,
+        user_id: int,
+        guide_data: Dict
+    ) -> TISSConsultationGuide:
+        """
+        Create a new consultation guide
+        
+        Args:
+            invoice_id: Invoice ID
+            clinic_id: Clinic ID
+            user_id: User ID creating the guide
+            guide_data: Guide data dictionary
+        
+        Returns:
+            Created TISSConsultationGuide
+        """
+        # Validate invoice exists
+        invoice_query = select(Invoice).where(Invoice.id == invoice_id)
+        invoice_result = await self.db.execute(invoice_query)
+        invoice = invoice_result.scalar_one_or_none()
+        
+        if not invoice:
+            raise ValueError(f"Invoice {invoice_id} not found")
+        
+        # Generate guide number
+        numero_guia = await self._generate_guide_number(clinic_id)
+        
+        # Get current TISS version
+        versao_tiss = await self.versioning.get_current_version()
+        
+        # Create guide
+        guide = TISSConsultationGuide(
+            clinic_id=clinic_id,
+            invoice_id=invoice_id,
+            appointment_id=invoice.appointment_id,
+            numero_guia=numero_guia,
+            tipo_guia='1',  # Consultation
+            data_emissao=date.today(),
+            prestador_data=guide_data.get("prestador", {}),
+            operadora_data=guide_data.get("operadora", {}),
+            beneficiario_data=guide_data.get("beneficiario", {}),
+            contratado_data=guide_data.get("contratado", {}),
+            procedimentos_data=guide_data.get("procedimentos", []),
+            valor_total=Decimal(str(guide_data.get("valor_total", 0))),
+            status='draft',
+            versao_tiss=versao_tiss
+        )
+        
+        self.db.add(guide)
+        await self.db.flush()
+        
+        # Calculate integrity hash
+        guide.hash_integridade = await self._calculate_integrity_hash(guide)
+        
+        # Create audit log
+        await self._create_audit_log(
+            clinic_id=clinic_id,
+            user_id=user_id,
+            action='create',
+            entity_type='consultation_guide',
+            entity_id=guide.id
+        )
+        
+        await self.db.commit()
+        await self.db.refresh(guide)
+        
+        logger.info(f"Created consultation guide {guide.id} for invoice {invoice_id}")
+        return guide
+    
+    async def validate_consultation_guide(
+        self,
+        guide_id: int
+    ) -> Dict[str, any]:
+        """
+        Validate a consultation guide
+        
+        Args:
+            guide_id: Guide ID
+        
+        Returns:
+            Validation result
+        """
+        query = select(TISSConsultationGuide).where(TISSConsultationGuide.id == guide_id)
+        result = await self.db.execute(query)
+        guide = result.scalar_one_or_none()
+        
+        if not guide:
+            return {
+                "is_valid": False,
+                "errors": [f"Guide {guide_id} not found"]
+            }
+        
+        errors = []
+        warnings = []
+        
+        # Validate required fields
+        if not guide.prestador_data.get("cnpj"):
+            errors.append("Prestador CNPJ is required")
+        
+        if not guide.operadora_data.get("registro_ans"):
+            errors.append("Operadora Registro ANS is required")
+        
+        if not guide.beneficiario_data.get("numero_carteira"):
+            errors.append("Beneficiário número da carteira is required")
+        
+        # Validate TUSS codes
+        procedimentos = guide.procedimentos_data or []
+        for proc in procedimentos:
+            codigo = proc.get("codigo_procedimento")
+            tabela = proc.get("codigo_tabela")
+            
+            if codigo and tabela:
+                validation = await self.tuss_service.validate_tuss_code(codigo, tabela)
+                if not validation["is_valid"]:
+                    errors.append(f"Invalid TUSS code: {codigo} in table {tabela}")
+        
+        # Validate values
+        if guide.valor_total <= 0:
+            errors.append("Valor total must be greater than zero")
+        
+        return {
+            "is_valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings
+        }
+    
+    async def generate_xml(
+        self,
+        guide_id: int
+    ) -> str:
+        """
+        Generate XML for a consultation guide
+        
+        Args:
+            guide_id: Guide ID
+        
+        Returns:
+            XML string
+        """
+        query = select(TISSConsultationGuide).where(TISSConsultationGuide.id == guide_id)
+        result = await self.db.execute(query)
+        guide = result.scalar_one_or_none()
+        
+        if not guide:
+            raise ValueError(f"Guide {guide_id} not found")
+        
+        # TODO: Implement XML generation using guide data
+        # This would use the existing tiss_service.generate_tiss_xml logic
+        # but adapted for the new model structure
+        
+        xml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<ans:mensagemTISS xmlns:ans="http://www.ans.gov.br/padroes/tiss/schemas">
+    <ans:cabecalho>
+        <ans:identificacaoTransacao>
+            <ans:tipoTransacao>ENVIO_LOTE_GUIAS</ans:tipoTransacao>
+            <ans:sequencialTransacao>1</ans:sequencialTransacao>
+            <ans:dataRegistroTransacao>{guide.data_emissao.strftime('%Y-%m-%d')}</ans:dataRegistroTransacao>
+            <ans:horaRegistroTransacao>{datetime.now().strftime('%H:%M:%S')}</ans:horaRegistroTransacao>
+        </ans:identificacaoTransacao>
+        <ans:origem>
+            <ans:identificacaoPrestador>
+                <ans:cnpjPrestador>{guide.prestador_data.get('cnpj', '')}</ans:cnpjPrestador>
+            </ans:identificacaoPrestador>
+        </ans:origem>
+        <ans:destino>
+            <ans:registroANS>{guide.operadora_data.get('registro_ans', '')}</ans:registroANS>
+        </ans:destino>
+        <ans:versaoPadrao>{guide.versao_tiss}</ans:versaoPadrao>
+    </ans:cabecalho>
+    <ans:prestadorParaOperadora>
+        <ans:loteGuias>
+            <ans:numeroLoteGuia>{guide.numero_guia}</ans:numeroLoteGuia>
+            <ans:guiasTISS>
+                <ans:guiaConsulta>
+                    <!-- XML content will be generated here -->
+                </ans:guiaConsulta>
+            </ans:guiasTISS>
+        </ans:loteGuias>
+    </ans:prestadorParaOperadora>
+</ans:mensagemTISS>"""
+        
+        # Update guide with XML
+        guide.xml_content = xml_content
+        guide.hash_integridade = await self._calculate_integrity_hash(guide)
+        await self.db.commit()
+        
+        return xml_content
+    
+    async def lock_guide(self, guide_id: int, user_id: int):
+        """Lock guide to prevent editing after submission"""
+        query = select(TISSConsultationGuide).where(TISSConsultationGuide.id == guide_id)
+        result = await self.db.execute(query)
+        guide = result.scalar_one_or_none()
+        
+        if guide:
+            guide.is_locked = True
+            guide.submitted_at = datetime.now()
+            
+            await self._create_audit_log(
+                clinic_id=guide.clinic_id,
+                user_id=user_id,
+                action='lock',
+                entity_type='consultation_guide',
+                entity_id=guide_id
+            )
+            
+            await self.db.commit()
+    
+    async def _generate_guide_number(self, clinic_id: int) -> str:
+        """Generate unique guide number"""
+        # Format: CLINIC_ID + TIMESTAMP + SEQUENCE
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        return f"{clinic_id}{timestamp}"
+    
+    async def _calculate_integrity_hash(self, guide: TISSConsultationGuide) -> str:
+        """Calculate SHA-256 hash for guide integrity"""
+        data = {
+            "numero_guia": guide.numero_guia,
+            "data_emissao": guide.data_emissao.isoformat(),
+            "prestador": guide.prestador_data,
+            "operadora": guide.operadora_data,
+            "beneficiario": guide.beneficiario_data,
+            "contratado": guide.contratado_data,
+            "procedimentos": guide.procedimentos_data,
+            "valor_total": str(guide.valor_total)
+        }
+        data_str = json.dumps(data, sort_keys=True)
+        return hashlib.sha256(data_str.encode()).hexdigest()
+    
+    async def _create_audit_log(
+        self,
+        clinic_id: int,
+        user_id: int,
+        action: str,
+        entity_type: str,
+        entity_id: int,
+        changes: Optional[Dict] = None
+    ):
+        """Create audit log entry"""
+        log = TISSAuditLog(
+            clinic_id=clinic_id,
+            user_id=user_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            changes=changes
+        )
+        self.db.add(log)
+

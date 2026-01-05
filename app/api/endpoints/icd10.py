@@ -71,7 +71,7 @@ async def import_all_icd10(
 @router.get("/search", response_model=List[ICD10SearchResult])
 async def search_icd10(
     query: str = Query(..., min_length=1),
-    level: Optional[str] = Query(None, regex="^(chapter|group|category|subcategory)$"),
+    level: Optional[str] = Query(None, pattern="^(chapter|group|category|subcategory)$"),
     limit: int = Query(20, ge=1, le=100),
     current_user: User = Depends(require_staff),
     db: AsyncSession = Depends(get_async_session),

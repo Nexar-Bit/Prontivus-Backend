@@ -150,7 +150,7 @@ async def list_exam_requests_for_clinic(
     status_filter: Optional[str] = Query(
         None,
         description="Filter by status: pending or completed",
-        regex="^(pending|completed)$",
+        pattern="^(pending|completed)$",
     ),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),

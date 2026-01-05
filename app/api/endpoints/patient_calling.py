@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 
 from database import get_async_session
 from app.core.auth import get_current_user
-from app.models import User, Appointment, Patient, PatientCall
-from app.schemas.patient_call import PatientCallResponse, PatientCallCreate, PatientCallUpdate
+from app.models import User, Appointment, Patient, PatientCall, UserRole
+from app.schemas.patient_call import PatientCallResponse, PatientCallCreate, PatientCallUpdate, PatientCallSecretaryCreate
 from app.api.endpoints.websocket_calling import broadcast_call_to_clinic, broadcast_status_update, broadcast_call_removed
 
 router = APIRouter(prefix="/patient-calling", tags=["Patient Calling"])
@@ -256,3 +256,136 @@ async def get_active_calls(
             if call_data.get("clinic_id") == current_user.clinic_id
         ]
 
+
+@router.post("/call-secretary", response_model=PatientCallResponse)
+async def call_secretary(
+    data: PatientCallSecretaryCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Patient calls secretary for assistance"""
+    try:
+        # Only patients can call secretaries
+        if current_user.role != UserRole.PATIENT:
+            raise HTTPException(status_code=403, detail="Apenas pacientes podem chamar secretárias")
+        
+        # Get patient record from user
+        from sqlalchemy import and_
+        patient_stmt = select(Patient).filter(
+            and_(
+                Patient.email == current_user.email,
+                Patient.clinic_id == current_user.clinic_id
+            )
+        )
+        patient_result = await db.execute(patient_stmt)
+        patient = patient_result.scalar_one_or_none()
+        
+        if not patient:
+            raise HTTPException(status_code=404, detail="Perfil de paciente não encontrado")
+        
+        # Get any available secretary for the clinic (or first active secretary)
+        secretary_stmt = select(User).filter(
+            and_(
+                User.clinic_id == current_user.clinic_id,
+                User.role == UserRole.SECRETARY,
+                User.is_active == True
+            )
+        ).limit(1)
+        secretary_result = await db.execute(secretary_stmt)
+        secretary = secretary_result.scalar_one_or_none()
+        
+        if not secretary:
+            raise HTTPException(status_code=404, detail="Nenhuma secretária disponível no momento")
+        
+        # Extract values
+        patient_id = patient.id
+        patient_name = f"{patient.first_name} {patient.last_name}"
+        clinic_id = current_user.clinic_id
+        secretary_id = secretary.id
+        secretary_name = f"{secretary.first_name} {secretary.last_name}"
+        called_at = datetime.now(timezone.utc)
+        
+        # For patient-to-secretary calls, we don't persist to database
+        # (PatientCall model requires appointment_id and doctor_id with foreign keys)
+        # Instead, we use in-memory storage only
+        import time
+        unique_call_id = int(time.time() * 1000) + patient_id  # Unique ID based on timestamp
+        
+        # Check if there's already an active call from this patient (within last 60 seconds)
+        from app.services.socket_manager import active_calls
+        call_key = f"patient_{patient_id}_secretary"
+        existing_call = active_calls.get(call_key)
+        
+        if existing_call and existing_call.get("call_type") == "patient_to_secretary":
+            # Check if call is recent (within 60 seconds)
+            existing_called_at = datetime.fromisoformat(existing_call["called_at"].replace('Z', '+00:00'))
+            if (called_at - existing_called_at).total_seconds() < 60:
+                # Update existing call timestamp
+                existing_call["called_at"] = called_at.isoformat()
+                existing_call["status"] = "called"
+                call_data = existing_call
+                call_id = existing_call["id"]
+            else:
+                # Create new call
+                call_id = unique_call_id
+                call_data = {
+                    "id": call_id,
+                    "appointment_id": 0,  # No appointment for patient-to-secretary calls
+                    "patient_id": patient_id,
+                    "patient_name": patient_name,
+                    "doctor_id": 0,  # No doctor for patient-to-secretary calls
+                    "doctor_name": None,
+                    "secretary_id": secretary_id,
+                    "secretary_name": secretary_name,
+                    "clinic_id": clinic_id,
+                    "status": "called",
+                    "called_at": called_at.isoformat(),
+                    "call_type": "patient_to_secretary",
+                    "reason": data.reason,
+                }
+                active_calls[call_key] = call_data
+        else:
+            # Create new call
+            call_id = unique_call_id
+            call_data = {
+                "id": call_id,
+                "appointment_id": 0,  # No appointment for patient-to-secretary calls
+                "patient_id": patient_id,
+                "patient_name": patient_name,
+                "doctor_id": 0,  # No doctor for patient-to-secretary calls
+                "doctor_name": None,
+                "secretary_id": secretary_id,
+                "secretary_name": secretary_name,
+                "clinic_id": clinic_id,
+                "status": "called",
+                "called_at": called_at.isoformat(),
+                "call_type": "patient_to_secretary",
+                "reason": data.reason,
+            }
+            active_calls[call_key] = call_data
+        
+        # Broadcast via WebSocket
+        await broadcast_call_to_clinic(clinic_id, call_data)
+        
+        return PatientCallResponse(
+            id=call_id,
+            appointment_id=0,
+            patient_id=patient_id,
+            doctor_id=0,
+            clinic_id=clinic_id,
+            status="called",
+            called_at=called_at,
+            answered_at=None,
+            patient_name=patient_name,
+            doctor_name=None,
+            secretary_name=secretary_name,
+            call_type="patient_to_secretary",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in patient calling secretary: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao chamar secretária: {str(e)}"
+        )

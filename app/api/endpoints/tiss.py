@@ -11,8 +11,10 @@ from sqlalchemy.orm import selectinload, joinedload
 
 from app.core.auth import get_current_user
 from app.models import User, Invoice, InvoiceStatus, Appointment, InvoiceLine
-from app.services.tiss_service import generate_tiss_xml, generate_batch_tiss_xml
-from app.services.tiss_validator import validate_tiss_document
+# Legacy imports - commented out as tiss_service uses old models that don't exist
+# TODO: Update endpoints to use new TISS module services
+# from app.services.tiss_service import generate_tiss_xml, generate_batch_tiss_xml
+# from app.services.tiss_validator import validate_tiss_document
 from database import get_async_session
 from typing import List
 
@@ -196,7 +198,12 @@ async def preview_tiss_xml(
             )
         
         # Generate TISS XML (skip validation for preview)
-        xml_content = await generate_tiss_xml(invoice_id, db, skip_validation=True)
+        # TODO: Update to use new TISS module services
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="This endpoint is deprecated. Please use the new TISS module endpoints at /api/v1/tiss/*"
+        )
+        # xml_content = await generate_tiss_xml(invoice_id, db, skip_validation=True)
         
         # Return XML content as text
         return Response(
@@ -256,7 +263,12 @@ async def generate_batch_tiss_xml_endpoint(
             )
         
         # Generate batch TISS XML
-        zip_content = await generate_batch_tiss_xml(invoice_ids, db)
+        # TODO: Update to use new TISS module services
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="This endpoint is deprecated. Please use the new TISS module endpoints at /api/v1/tiss/batch/*"
+        )
+        # zip_content = await generate_batch_tiss_xml(invoice_ids, db)
         
         # Return ZIP file for download
         from datetime import datetime
@@ -328,11 +340,14 @@ async def validate_tiss_xml(
             )
         
         # Build TISS document structure
-        from app.services.tiss_service import _build_tiss_document
-        tiss_doc = await _build_tiss_document(invoice)
-        
-        # Validate TISS document
-        validation_result = validate_tiss_document(tiss_doc)
+        # TODO: Update to use new TISS module services
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="This endpoint is deprecated. Please use the new TISS module endpoints at /api/v1/tiss/*/validate"
+        )
+        # from app.services.tiss_service import _build_tiss_document
+        # tiss_doc = await _build_tiss_document(invoice)
+        # validation_result = validate_tiss_document(tiss_doc)
         
         return validation_result
         

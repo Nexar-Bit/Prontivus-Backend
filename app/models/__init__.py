@@ -208,6 +208,7 @@ class Patient(BaseModel):
     invoices = relationship("Invoice", back_populates="patient", cascade="all, delete-orphan")
     preauth_requests = relationship("PreAuthRequest", back_populates="patient", cascade="all, delete-orphan")
     message_threads = relationship("MessageThread", back_populates="patient", cascade="all, delete-orphan")
+    telemetry_records = relationship("PatientTelemetry", back_populates="patient", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Patient(id={self.id}, name='{self.full_name}')>"
@@ -319,6 +320,22 @@ from app.models.patient_call import PatientCall
 
 # Import TISS template models
 from app.models.tiss_template import TissTemplate, TissTemplateCategory
+from app.models.tiss_config import TissConfig
+
+# Import TISS database models
+from app.models.tiss import (
+    TISSConsultationGuide,
+    TISHospitalizationGuide,
+    TISSSADTGuide,
+    TISSIndividualFee,
+    TISSBatch,
+    TISSStatement,
+    TISSAttachment,
+    TUSSCode,
+    TUSSVersionHistory,
+    TISSVersion,
+    TISSAuditLog,
+)
 from app.models.system_log import SystemLog
 
 # Import user settings model
@@ -335,6 +352,8 @@ from app.models.report_config import ReportConfig
 from app.models.task import Task, TaskPriority
 from app.models.support import SupportTicket, HelpArticle, TicketStatus, TicketPriority
 from app.models.password_reset import PasswordResetToken
+from app.models.document_signature import DocumentSignature, SignatureStatus, DocumentType
+from app.models.telemetry import PatientTelemetry
 from app.models.ai_config import AIConfig
 
 # Export all models
@@ -395,6 +414,18 @@ __all__ = [
     "PatientCall",
     "TissTemplate",
     "TissTemplateCategory",
+    "TissConfig",
+    "TISSConsultationGuide",
+    "TISHospitalizationGuide",
+    "TISSSADTGuide",
+    "TISSIndividualFee",
+    "TISSBatch",
+    "TISSStatement",
+    "TISSAttachment",
+    "TUSSCode",
+    "TUSSVersionHistory",
+    "TISSVersion",
+    "TISSAuditLog",
     "UserSettings",
     "PushSubscription",
     "SystemLog",

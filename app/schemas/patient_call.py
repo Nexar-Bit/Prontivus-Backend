@@ -14,6 +14,8 @@ class PatientCallResponse(BaseModel):
     answered_at: Optional[datetime] = None
     patient_name: Optional[str] = None
     doctor_name: Optional[str] = None
+    secretary_name: Optional[str] = None
+    call_type: Optional[str] = None  # "doctor_to_patient" or "patient_to_secretary"
     room_number: Optional[str] = None
 
     class Config:
@@ -22,6 +24,11 @@ class PatientCallResponse(BaseModel):
 
 class PatientCallCreate(BaseModel):
     appointment_id: int
+
+
+class PatientCallSecretaryCreate(BaseModel):
+    """Schema for patient calling secretary - no appointment required"""
+    reason: Optional[str] = None  # Optional reason for the call
 
 
 class PatientCallUpdate(BaseModel):

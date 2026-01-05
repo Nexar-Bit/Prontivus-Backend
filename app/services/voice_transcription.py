@@ -21,7 +21,16 @@ except ImportError as e:
     # If speech_recognition fails to import (e.g., due to missing aifc in Python 3.13)
     # Create a mock recognizer that will fail gracefully
     SPEECH_RECOGNITION_AVAILABLE = False
-    logging.warning(f"SpeechRecognition not available: {e}. Voice transcription will be disabled.")
+    logging.warning(f"SpeechRecognition not available: {e}. Will try OpenAI Whisper as fallback.")
+
+# Try OpenAI as fallback for Python 3.13+
+try:
+    from openai import AsyncOpenAI
+    import os
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    logging.warning("OpenAI library not available. Voice transcription may be limited.")
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +44,23 @@ class VoiceTranscriptionService:
     def __init__(self):
         if not SPEECH_RECOGNITION_AVAILABLE:
             self.recognizer = None
-            logger.warning("SpeechRecognition not available. Voice transcription disabled.")
+            logger.warning("SpeechRecognition not available. Will use OpenAI Whisper as fallback.")
         else:
             self.recognizer = sr.Recognizer()
             # Adjust for ambient noise
             self.recognizer.energy_threshold = 4000
             self.recognizer.dynamic_energy_threshold = True
+        
+        # Initialize OpenAI client if available and SpeechRecognition is not
+        self.openai_client = None
+        if not SPEECH_RECOGNITION_AVAILABLE and OPENAI_AVAILABLE:
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            if openai_api_key:
+                self.openai_client = AsyncOpenAI(api_key=openai_api_key)
+                logger.info("Using OpenAI Whisper for transcription (Python 3.13 compatible)")
+            else:
+                logger.warning("OPENAI_API_KEY not found. Voice transcription will be disabled.")
+        
         self.medical_terms = self._load_medical_terms()
     
     def _load_medical_terms(self) -> List[str]:
@@ -79,21 +99,33 @@ class VoiceTranscriptionService:
         Returns:
             Dictionary with transcription results
         """
-        if not SPEECH_RECOGNITION_AVAILABLE or self.recognizer is None:
+        # Check if any transcription method is available
+        if not SPEECH_RECOGNITION_AVAILABLE and not (self.openai_client and OPENAI_AVAILABLE):
             return {
                 'success': False,
-                'error': 'Voice transcription is not available. SpeechRecognition library is not compatible with this Python version.',
+                'error': 'Voice transcription is not available. SpeechRecognition library is not compatible with Python 3.13. Please configure OPENAI_API_KEY to use OpenAI Whisper as alternative.',
                 'raw_text': '',
                 'enhanced_text': '',
                 'structured_notes': {}
             }
         
         try:
-            # Convert audio to WAV format if needed
-            audio_data = await self._convert_audio_format(audio_file)
-            
-            # Perform transcription
-            text = await self._transcribe_with_google(audio_data, language)
+            # Perform transcription using available method
+            if SPEECH_RECOGNITION_AVAILABLE and self.recognizer:
+                # Use SpeechRecognition (Python < 3.13)
+                audio_data = await self._convert_audio_format(audio_file)
+                text = await self._transcribe_with_google(audio_data, language)
+            elif self.openai_client and OPENAI_AVAILABLE:
+                # Use OpenAI Whisper (Python 3.13+ compatible)
+                text = await self._transcribe_with_openai(audio_file, language)
+            else:
+                return {
+                    'success': False,
+                    'error': 'No transcription method available',
+                    'raw_text': '',
+                    'enhanced_text': '',
+                    'structured_notes': {}
+                }
             
             if not text:
                 return {
@@ -234,6 +266,65 @@ class VoiceTranscriptionService:
             raise Exception("Google Speech Recognition could not understand audio")
         except sr.RequestError as e:
             raise Exception(f"Could not request results from Google Speech Recognition service: {e}")
+    
+    async def _transcribe_with_openai(self, audio_file: bytes, language: str) -> str:
+        """
+        Transcribe using OpenAI Whisper API (Python 3.13+ compatible)
+        
+        Args:
+            audio_file: Audio file bytes in any format
+            language: Language code (e.g., 'pt-BR', 'en-US', 'es-ES')
+        
+        Returns:
+            Transcribed text
+        """
+        if not self.openai_client:
+            raise Exception("OpenAI client is not available")
+        
+        try:
+            # Create a temporary file for the audio
+            suffix = '.mp3'  # Default suffix, OpenAI Whisper supports many formats
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_audio:
+                temp_audio.write(audio_file)
+                temp_audio.flush()
+                temp_path = temp_audio.name
+            
+            try:
+                # Map language codes (OpenAI uses ISO 639-1, e.g., 'pt' instead of 'pt-BR')
+                language_map = {
+                    'pt-BR': 'pt',
+                    'pt-PT': 'pt',
+                    'en-US': 'en',
+                    'en-GB': 'en',
+                    'es-ES': 'es',
+                    'es-MX': 'es',
+                    'fr-FR': 'fr',
+                    'de-DE': 'de',
+                    'it-IT': 'it',
+                    'ja-JP': 'ja',
+                    'ko-KR': 'ko',
+                    'zh-CN': 'zh'
+                }
+                whisper_language = language_map.get(language, language.split('-')[0] if '-' in language else language)
+                
+                # Open the file and transcribe
+                with open(temp_path, 'rb') as audio_file_obj:
+                    transcript = await self.openai_client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file_obj,
+                        language=whisper_language if whisper_language in ['pt', 'en', 'es', 'fr', 'de', 'it', 'ja', 'ko', 'zh'] else None
+                    )
+                
+                return transcript.text
+                
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    
+        except Exception as e:
+            logger.error(f"OpenAI Whisper transcription error: {str(e)}")
+            raise Exception(f"OpenAI Whisper transcription failed: {str(e)}")
     
     def _enhance_medical_terms(self, text: str) -> str:
         """

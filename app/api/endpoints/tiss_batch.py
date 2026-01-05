@@ -11,7 +11,10 @@ from typing import List
 
 from app.core.auth import get_current_user
 from app.models import User, Invoice
-from app.services.tiss_service import generate_batch_tiss_xml
+# Legacy import - commented out as tiss_service uses old models
+# from app.services.tiss_service import generate_batch_tiss_xml
+# TODO: Update to use new TISS module services
+from app.services.tiss.batch_generator import BatchGeneratorService
 from database import get_async_session
 
 router = APIRouter(tags=["TISS Batch"])
@@ -57,7 +60,13 @@ async def generate_batch_tiss_xml_endpoint(
             )
         
         # Generate batch TISS XML
-        zip_content = await generate_batch_tiss_xml(invoice_ids, db)
+        # TODO: Update to use new TISS module BatchGeneratorService
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="This endpoint is deprecated. Please use the new TISS module endpoints at /api/v1/tiss/batch/*"
+        )
+        # service = BatchGeneratorService(db)
+        # zip_content = await service.generate_batch_xml(invoice_ids)
         
         # Return ZIP file for download
         filename = f"tiss_batch_{len(invoice_ids)}_invoices.zip"

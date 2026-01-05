@@ -12,7 +12,22 @@ from fastapi import HTTPException, status
 from config import settings
 
 # Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Configure bcrypt to avoid wrap bug detection issues
+# The issue occurs when passlib tries to detect wrap bug during initialization
+# We'll use bcrypt directly for verification to bypass this issue
+# But keep passlib for hashing (which doesn't trigger the wrap bug detection)
+try:
+    # Initialize passlib for hashing (hashing doesn't trigger wrap bug detection)
+    pwd_context = CryptContext(
+        schemes=["bcrypt"],
+        deprecated="auto",
+        bcrypt__rounds=12
+    )
+except Exception as e:
+    # If initialization fails, use default configuration
+    import logging
+    logging.warning(f"Bcrypt initialization warning: {e}")
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Rate limiting storage (in production, use Redis)
 login_attempts: Dict[str, Dict[str, Any]] = {}
@@ -31,12 +46,49 @@ def generate_secure_token(length: int = 32) -> str:
 
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt"""
+    # Bcrypt has a 72-byte limit, truncate if necessary
+    if isinstance(password, str):
+        password_bytes = password.encode('utf-8')
+        if len(password_bytes) > 72:
+            password_bytes = password_bytes[:72]
+            password = password_bytes.decode('utf-8', errors='ignore')
     return pwd_context.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its hash"""
-    return pwd_context.verify(plain_password, hashed_password)
+    import bcrypt
+    
+    try:
+        # Bcrypt has a 72-byte limit, truncate if necessary before verification
+        if isinstance(plain_password, str):
+            password_bytes = plain_password.encode('utf-8')
+            if len(password_bytes) > 72:
+                # Truncate to 72 bytes, but try to preserve as much as possible
+                password_bytes = password_bytes[:72]
+                # Remove any incomplete UTF-8 sequences at the end
+                while password_bytes and (password_bytes[-1] & 0xC0) == 0x80:
+                    password_bytes = password_bytes[:-1]
+                plain_password = password_bytes.decode('utf-8', errors='ignore')
+        
+        # Use bcrypt directly to avoid passlib initialization issues
+        # This bypasses the wrap bug detection that happens during passlib initialization
+        if isinstance(hashed_password, str):
+            hashed_bytes = hashed_password.encode('utf-8')
+        else:
+            hashed_bytes = hashed_password
+            
+        password_bytes = plain_password.encode('utf-8')
+        
+        # Use bcrypt.checkpw directly
+        return bcrypt.checkpw(password_bytes, hashed_bytes)
+        
+    except (ValueError, Exception) as e:
+        # Fallback to passlib if direct bcrypt fails
+        try:
+            return pwd_context.verify(plain_password, hashed_password)
+        except Exception:
+            return False
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
