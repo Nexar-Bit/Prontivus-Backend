@@ -21,6 +21,7 @@ openpyxl==3.1.5
 phonenumbers==8.13.31
 aiohttp==3.9.1
 httpx==0.26.0
+lxml>=5.0.0
 cryptography==41.0.7
 sentry-sdk[fastapi]==2.15.0
 redis==5.0.1
