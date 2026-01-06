@@ -21,8 +21,7 @@ except ImportError as e:
     # If speech_recognition fails to import (e.g., due to missing aifc in Python 3.13)
     # Create a mock recognizer that will fail gracefully
     SPEECH_RECOGNITION_AVAILABLE = False
-    # Info level since fallback to OpenAI Whisper is available and working
-    logging.info(f"SpeechRecognition not available (Python 3.13): {e}. Using OpenAI Whisper as fallback.")
+    # Don't log at module level - will be logged once in __init__ when service is instantiated
 
 # Try OpenAI as fallback for Python 3.13+
 try:
@@ -45,8 +44,8 @@ class VoiceTranscriptionService:
     def __init__(self):
         if not SPEECH_RECOGNITION_AVAILABLE:
             self.recognizer = None
-            # Info level since OpenAI Whisper fallback is working correctly
-            logger.info("Using OpenAI Whisper for transcription (Python 3.13 compatible).")
+            # Only log once when service is initialized, use debug level since this is expected behavior
+            logger.debug("SpeechRecognition not available (Python 3.13). Using OpenAI Whisper as fallback.")
         else:
             self.recognizer = sr.Recognizer()
             # Adjust for ambient noise
@@ -59,7 +58,8 @@ class VoiceTranscriptionService:
             openai_api_key = os.getenv('OPENAI_API_KEY')
             if openai_api_key:
                 self.openai_client = AsyncOpenAI(api_key=openai_api_key)
-                logger.info("Using OpenAI Whisper for transcription (Python 3.13 compatible)")
+                # Only log once when OpenAI client is successfully initialized
+                logger.debug("OpenAI Whisper transcription initialized (Python 3.13 compatible)")
             else:
                 logger.warning("OPENAI_API_KEY not found. Voice transcription will be disabled.")
         
