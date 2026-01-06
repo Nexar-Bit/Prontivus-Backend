@@ -136,8 +136,12 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     allowed_origins = get_cors_origins()
     
     # Check if origin is allowed
+    # Mobile apps don't send origin header, so allow requests without origin
     is_allowed = False
-    if origin:
+    if not origin:
+        # No origin header (mobile apps, Postman, etc.) - allow by default
+        is_allowed = True
+    elif origin:
         if origin in allowed_origins:
             is_allowed = True
         # Always allow localhost origins (for both dev and production local testing)
@@ -146,8 +150,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     
     if is_allowed:
         headers = {
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Origin": origin if origin else "*",  # Use * for requests without origin
+            "Access-Control-Allow-Credentials": "true" if origin else "false",  # Can't use credentials with *
             "Access-Control-Allow-Methods": "*",
             "Access-Control-Allow-Headers": "*",
         }
@@ -171,8 +175,12 @@ async def global_exception_handler(request: Request, exc: Exception):
     allowed_origins = get_cors_origins()
     
     # Check if origin is allowed
+    # Mobile apps don't send origin header, so allow requests without origin
     is_allowed = False
-    if origin:
+    if not origin:
+        # No origin header (mobile apps, Postman, etc.) - allow by default
+        is_allowed = True
+    elif origin:
         if origin in allowed_origins:
             is_allowed = True
         # Always allow localhost origins (for both dev and production local testing)
@@ -181,8 +189,8 @@ async def global_exception_handler(request: Request, exc: Exception):
     
     if is_allowed:
         headers = {
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Origin": origin if origin else "*",  # Use * for requests without origin
+            "Access-Control-Allow-Credentials": "true" if origin else "false",  # Can't use credentials with *
             "Access-Control-Allow-Methods": "*",
             "Access-Control-Allow-Headers": "*",
         }
@@ -222,8 +230,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     allowed_origins = get_cors_origins()
     
     # Check if origin is allowed
+    # Mobile apps don't send origin header, so allow requests without origin
     is_allowed = False
-    if origin:
+    if not origin:
+        # No origin header (mobile apps, Postman, etc.) - allow by default
+        is_allowed = True
+    elif origin:
         if origin in allowed_origins:
             is_allowed = True
         # Always allow localhost origins (for both dev and production local testing)
@@ -232,8 +244,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     
     if is_allowed:
         headers = {
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Origin": origin if origin else "*",  # Use * for requests without origin
+            "Access-Control-Allow-Credentials": "true" if origin else "false",  # Can't use credentials with *
             "Access-Control-Allow-Methods": "*",
             "Access-Control-Allow-Headers": "*",
         }
@@ -376,6 +388,11 @@ app.include_router(report_config.router, prefix="/api", tags=["Report Config (Le
 @app.get("/")
 async def root():
     """Health check endpoint"""
+    return {"status": "healthy"}
+
+@app.get("/health")
+async def health_check_simple():
+    """Simple health check endpoint for mobile apps and monitoring"""
     return {"status": "healthy"}
 
 @app.get("/favicon.ico")
