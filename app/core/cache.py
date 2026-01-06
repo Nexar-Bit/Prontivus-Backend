@@ -3,10 +3,13 @@ Redis caching utilities for improved performance
 """
 import os
 import json
+import logging
 from typing import Optional, Any, Dict
 import redis.asyncio as redis
 from functools import wraps
 import hashlib
+
+logger = logging.getLogger(__name__)
 
 
 class CacheManager:
@@ -30,10 +33,11 @@ class CacheManager:
                 await self.redis_client.ping()
                 self.enabled = True
             except Exception as e:
-                print(f"⚠️  Redis connection failed: {e}. Continuing without cache.")
+                logger.warning(f"Redis connection failed: {e}. Continuing without cache.")
                 self.enabled = False
         else:
-            print("ℹ️  Redis URL not configured. Caching disabled.")
+            # Redis is optional - use debug level instead of print
+            logger.debug("Redis URL not configured. Caching disabled (optional feature).")
             self.enabled = False
     
     async def disconnect(self):

@@ -21,7 +21,8 @@ except ImportError as e:
     # If speech_recognition fails to import (e.g., due to missing aifc in Python 3.13)
     # Create a mock recognizer that will fail gracefully
     SPEECH_RECOGNITION_AVAILABLE = False
-    logging.warning(f"SpeechRecognition not available: {e}. Will try OpenAI Whisper as fallback.")
+    # Info level since fallback to OpenAI Whisper is available and working
+    logging.info(f"SpeechRecognition not available (Python 3.13): {e}. Using OpenAI Whisper as fallback.")
 
 # Try OpenAI as fallback for Python 3.13+
 try:
@@ -44,7 +45,8 @@ class VoiceTranscriptionService:
     def __init__(self):
         if not SPEECH_RECOGNITION_AVAILABLE:
             self.recognizer = None
-            logger.warning("SpeechRecognition not available. Will use OpenAI Whisper as fallback.")
+            # Info level since OpenAI Whisper fallback is working correctly
+            logger.info("Using OpenAI Whisper for transcription (Python 3.13 compatible).")
         else:
             self.recognizer = sr.Recognizer()
             # Adjust for ambient noise
