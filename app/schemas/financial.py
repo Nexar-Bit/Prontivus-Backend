@@ -371,3 +371,88 @@ class ExpenseResponse(ExpenseBase):
             datetime: lambda v: v.isoformat() if v else None,
             Decimal: lambda v: float(v) if v else 0.0
         }
+
+
+# ==================== Budgets ====================
+
+class BudgetLineBase(BaseModel):
+    """Base budget line schema"""
+    service_item_id: Optional[int] = Field(None, description="Service item ID")
+    procedure_id: Optional[int] = Field(None, description="Procedure ID")
+    quantity: Decimal = Field(..., decimal_places=2, description="Quantity")
+    unit_price: Decimal = Field(..., decimal_places=2, description="Unit price")
+    description: Optional[str] = Field(None, max_length=500, description="Line description")
+
+
+class BudgetLineCreate(BudgetLineBase):
+    """Schema for creating a budget line"""
+    pass
+
+
+class BudgetLineResponse(BudgetLineBase):
+    """Schema for budget line responses"""
+    id: int
+    line_total: Decimal
+    created_at: datetime
+    service_item: Optional[ServiceItemResponse] = None
+    procedure_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None,
+            Decimal: lambda v: float(v) if v else 0.0
+        }
+
+
+class BudgetBase(BaseModel):
+    """Base budget schema"""
+    patient_id: int = Field(..., description="Patient ID")
+    appointment_id: Optional[int] = Field(None, description="Related appointment ID")
+    valid_until: Optional[datetime] = Field(None, description="Budget expiration date")
+    notes: Optional[str] = Field(None, description="Budget notes")
+
+
+class BudgetCreate(BudgetBase):
+    """Schema for creating a budget"""
+    service_items: List[BudgetLineCreate] = Field(..., description="List of service items in budget")
+
+
+class BudgetUpdate(BaseModel):
+    """Schema for updating a budget"""
+    valid_until: Optional[datetime] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class BudgetResponse(BudgetBase):
+    """Schema for budget responses"""
+    id: int
+    issue_date: datetime
+    status: str
+    total_amount: Decimal
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    sent_at: Optional[datetime] = None
+    accepted_at: Optional[datetime] = None
+    rejected_at: Optional[datetime] = None
+    patient_name: Optional[str] = None
+    appointment_date: Optional[datetime] = None
+    creator_name: Optional[str] = None
+    budget_lines: Optional[List[BudgetLineResponse]] = None
+
+    class Config:
+        from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None,
+            Decimal: lambda v: float(v) if v else 0.0
+        }
+
+
+class BudgetDetailResponse(BudgetResponse):
+    """Detailed budget response with all relationships"""
+    patient_name: str
+    appointment_date: Optional[datetime] = None
+    doctor_name: Optional[str] = None
+    budget_lines: List[BudgetLineResponse]
+    converted_to_invoice_id: Optional[int] = None

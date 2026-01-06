@@ -227,3 +227,69 @@ class Expense(Base):
     # Relationships
     doctor = relationship("User", foreign_keys=[doctor_id])
     clinic = relationship("Clinic")
+
+
+class BudgetStatus(str, enum.Enum):
+    """Budget status enumeration"""
+    DRAFT = "draft"
+    SENT = "sent"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    CONVERTED = "converted"  # Converted to invoice
+    EXPIRED = "expired"
+
+
+class Budget(Base):
+    """Budget/Estimate model for patient treatment plans"""
+    __tablename__ = "budgets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False, index=True)
+    appointment_id = Column(Integer, ForeignKey("appointments.id"), nullable=True, index=True)
+    clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False, index=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    
+    # Budget details
+    issue_date = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    valid_until = Column(DateTime(timezone=True), nullable=True)  # Budget expiration date
+    status = Column(SQLEnum(BudgetStatus, native_enum=False), nullable=False, default='draft', index=True)
+    total_amount = Column(Numeric(10, 2), nullable=False, default=0.00)
+    notes = Column(Text, nullable=True)
+    
+    # Conversion tracking
+    converted_to_invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    rejected_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    patient = relationship("Patient", back_populates="budgets")
+    appointment = relationship("Appointment", back_populates="budgets")
+    clinic = relationship("Clinic")
+    creator = relationship("User", foreign_keys=[created_by])
+    budget_lines = relationship("BudgetLine", back_populates="budget", cascade="all, delete-orphan")
+    converted_invoice = relationship("Invoice", foreign_keys=[converted_to_invoice_id])
+
+
+class BudgetLine(Base):
+    """Individual line items on a budget"""
+    __tablename__ = "budget_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    budget_id = Column(Integer, ForeignKey("budgets.id"), nullable=False)
+    service_item_id = Column(Integer, ForeignKey("service_items.id"), nullable=True)
+    procedure_id = Column(Integer, ForeignKey("procedures.id"), nullable=True)
+    quantity = Column(Numeric(8, 2), nullable=False, default=1.00)
+    unit_price = Column(Numeric(10, 2), nullable=False)
+    line_total = Column(Numeric(10, 2), nullable=False)
+    description = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    budget = relationship("Budget", back_populates="budget_lines")
+    service_item = relationship("ServiceItem")
+    procedure = relationship("Procedure")

@@ -206,6 +206,7 @@ class Patient(BaseModel):
     clinic = relationship("Clinic", back_populates="patients")
     appointments = relationship("Appointment", back_populates="patient", cascade="all, delete-orphan")
     invoices = relationship("Invoice", back_populates="patient", cascade="all, delete-orphan")
+    budgets = relationship("Budget", back_populates="patient", cascade="all, delete-orphan")
     preauth_requests = relationship("PreAuthRequest", back_populates="patient", cascade="all, delete-orphan")
     message_threads = relationship("MessageThread", back_populates="patient", cascade="all, delete-orphan")
     telemetry_records = relationship("PatientTelemetry", back_populates="patient", cascade="all, delete-orphan")
@@ -272,6 +273,7 @@ class Appointment(BaseModel):
     clinic = relationship("Clinic", back_populates="appointments")
     clinical_record = relationship("ClinicalRecord", back_populates="appointment", uselist=False, cascade="all, delete-orphan")
     invoice = relationship("Invoice", back_populates="appointment", uselist=False, cascade="all, delete-orphan")
+    budgets = relationship("Budget", back_populates="appointment", cascade="all, delete-orphan")
     voice_sessions = relationship("VoiceSession", back_populates="appointment", cascade="all, delete-orphan")
     
     def __repr__(self):
@@ -291,6 +293,7 @@ from app.models.clinical import ClinicalRecord, Prescription, ExamRequest, Urgen
 from app.models.financial import (
     ServiceItem, Invoice, InvoiceLine, ServiceCategory, InvoiceStatus,
     Payment, PaymentMethod, PaymentStatus,
+    Budget, BudgetLine, BudgetStatus,
     InsurancePlan, PreAuthRequest, PreAuthStatus,
     Expense, ExpenseStatus
 )
@@ -384,6 +387,9 @@ __all__ = [
     "PreAuthStatus",
     "Expense",
     "ExpenseStatus",
+    "Budget",
+    "BudgetLine",
+    "BudgetStatus",
     "Product",
     "StockMovement",
     "StockAlert",

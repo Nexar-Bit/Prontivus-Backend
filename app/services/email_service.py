@@ -6,7 +6,9 @@ import smtplib
 import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Optional, List
+from email.mime.base import MIMEBase
+from email import encoders
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 import logging
 
@@ -37,6 +39,7 @@ class EmailService:
         subject: str,
         html_body: str,
         text_body: Optional[str] = None,
+        attachments: Optional[List[Tuple[str, bytes, str]]] = None,
     ) -> bool:
         """
         Send an email (non-blocking - runs in thread pool to avoid blocking event loop)
@@ -44,7 +47,7 @@ class EmailService:
         import asyncio
         # Run synchronous SMTP operations in thread pool to avoid blocking event loop
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._send_email_sync, to_email, subject, html_body, text_body)
+        return await loop.run_in_executor(None, self._send_email_sync, to_email, subject, html_body, text_body, attachments)
     
     def _send_email_sync(
         self,
@@ -52,6 +55,7 @@ class EmailService:
         subject: str,
         html_body: str,
         text_body: Optional[str] = None,
+        attachments: Optional[List[Tuple[str, bytes, str]]] = None,
     ) -> bool:
         """
         Synchronous email sending (called from thread pool executor to avoid blocking event loop)
@@ -87,6 +91,19 @@ class EmailService:
             
             html_part = MIMEText(html_body, 'html', 'utf-8')
             msg.attach(html_part)
+            
+            # Add attachments if provided
+            # attachments format: [(filename, file_bytes, content_type), ...]
+            if attachments:
+                for filename, file_bytes, content_type in attachments:
+                    part = MIMEBase('application', 'octet-stream')
+                    part.set_payload(file_bytes)
+                    encoders.encode_base64(part)
+                    part.add_header(
+                        'Content-Disposition',
+                        f'attachment; filename= {filename}'
+                    )
+                    msg.attach(part)
             
             # Send email
             # Port 465 uses SSL, port 587 uses TLS

@@ -27,7 +27,7 @@ except Exception as e:
     # If initialization fails, use default configuration
     import logging
     logging.warning(f"Bcrypt initialization warning: {e}")
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Rate limiting storage (in production, use Redis)
 login_attempts: Dict[str, Dict[str, Any]] = {}

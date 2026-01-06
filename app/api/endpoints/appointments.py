@@ -2,6 +2,8 @@
 Appointment management API endpoints
 """
 import datetime
+import os
+import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi import WebSocket, WebSocketDisconnect
@@ -20,6 +22,8 @@ from app.schemas.appointment import (
 from pydantic import BaseModel
 from database import get_async_session
 from app.services.realtime import appointment_realtime_manager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/appointments", tags=["Appointments"])
 
@@ -505,6 +509,104 @@ async def book_patient_appointment(
         },
     )
     
+    # Send confirmation email to patient
+    if patient.email:
+        try:
+            from app.services.email_service import email_service
+            from datetime import datetime
+            
+            # Format appointment date and time
+            appointment_date = db_appointment.scheduled_datetime.strftime("%d/%m/%Y")
+            appointment_time = db_appointment.scheduled_datetime.strftime("%H:%M")
+            
+            # Get frontend URL
+            frontend_url = os.getenv("FRONTEND_URL", "https://prontivus-frontend-p2rr.vercel.app")
+            appointment_url = f"{frontend_url}/portal/appointments/{db_appointment.id}"
+            
+            html_body = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ background-color: #0F4C75; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
+                    .content {{ background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; }}
+                    .appointment-info {{ background-color: white; padding: 20px; margin: 20px 0; border-left: 4px solid #0F4C75; }}
+                    .info-item {{ margin: 10px 0; padding: 8px; }}
+                    .info-label {{ font-weight: bold; color: #0F4C75; }}
+                    .button {{ display: inline-block; padding: 12px 24px; background-color: #0F4C75; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+                    .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Confirmação de Agendamento</h1>
+                    </div>
+                    <div class="content">
+                        <p>Olá <strong>{patient.first_name}</strong>,</p>
+                        <p>Seu agendamento foi confirmado com sucesso!</p>
+                        
+                        <div class="appointment-info">
+                            <div class="info-item">
+                                <span class="info-label">Data:</span> {appointment_date}
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Horário:</span> {appointment_time}
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Médico:</span> {doctor.full_name}
+                            </div>
+                            {f'<div class="info-item"><span class="info-label">Motivo:</span> {db_appointment.reason}</div>' if db_appointment.reason else ''}
+                        </div>
+                        
+                        <p style="text-align: center;">
+                            <a href="{appointment_url}" class="button">Ver Detalhes do Agendamento</a>
+                        </p>
+                        
+                        <p><strong>Lembrete:</strong> Por favor, chegue com 15 minutos de antecedência.</p>
+                    </div>
+                    <div class="footer">
+                        <p>Atenciosamente,<br/><strong>{clinic.name if hasattr(clinic, 'name') else 'Equipe Prontivus'}</strong></p>
+                        <p style="margin-top: 20px; font-size: 11px; color: #999;">
+                            Este é um e-mail automático. Por favor, não responda a esta mensagem.
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            text_body = (
+                f"Confirmação de Agendamento\n\n"
+                f"Olá {patient.first_name},\n\n"
+                f"Seu agendamento foi confirmado com sucesso!\n\n"
+                f"DADOS DO AGENDAMENTO:\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Data: {appointment_date}\n"
+                f"Horário: {appointment_time}\n"
+                f"Médico: {doctor.full_name}\n"
+                f"{f'Motivo: {db_appointment.reason}\n' if db_appointment.reason else ''}"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Lembrete: Por favor, chegue com 15 minutos de antecedência.\n\n"
+                f"Ver detalhes: {appointment_url}\n\n"
+                f"Atenciosamente,\n{clinic.name if hasattr(clinic, 'name') else 'Equipe Prontivus'}\n\n"
+                f"---\n"
+                f"Este é um e-mail automático. Por favor, não responda a esta mensagem."
+            )
+            
+            await email_service.send_email(
+                to_email=patient.email,
+                subject=f"Confirmação de Agendamento - {appointment_date} às {appointment_time}",
+                html_body=html_body,
+                text_body=text_body,
+            )
+        except Exception as e:
+            # Don't fail appointment creation if email sending fails
+            logger.error(f"Failed to send appointment confirmation email: {str(e)}")
+    
     return response
 
 
@@ -905,6 +1007,109 @@ async def create_appointment(
             "status": str(db_appointment.status),
         },
     )
+    
+    # Send confirmation email to patient
+    if patient.email:
+        try:
+            from app.services.email_service import email_service
+            from app.models import Clinic
+            
+            # Get clinic info
+            clinic_query = select(Clinic).filter(Clinic.id == current_user.clinic_id)
+            clinic_result = await db.execute(clinic_query)
+            clinic = clinic_result.scalar_one_or_none()
+            
+            # Format appointment date and time
+            appointment_date = db_appointment.scheduled_datetime.strftime("%d/%m/%Y")
+            appointment_time = db_appointment.scheduled_datetime.strftime("%H:%M")
+            
+            # Get frontend URL
+            frontend_url = os.getenv("FRONTEND_URL", "https://prontivus-frontend-p2rr.vercel.app")
+            appointment_url = f"{frontend_url}/portal/appointments/{db_appointment.id}"
+            
+            html_body = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ background-color: #0F4C75; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
+                    .content {{ background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; }}
+                    .appointment-info {{ background-color: white; padding: 20px; margin: 20px 0; border-left: 4px solid #0F4C75; }}
+                    .info-item {{ margin: 10px 0; padding: 8px; }}
+                    .info-label {{ font-weight: bold; color: #0F4C75; }}
+                    .button {{ display: inline-block; padding: 12px 24px; background-color: #0F4C75; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+                    .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Confirmação de Agendamento</h1>
+                    </div>
+                    <div class="content">
+                        <p>Olá <strong>{patient.first_name}</strong>,</p>
+                        <p>Seu agendamento foi confirmado com sucesso!</p>
+                        
+                        <div class="appointment-info">
+                            <div class="info-item">
+                                <span class="info-label">Data:</span> {appointment_date}
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Horário:</span> {appointment_time}
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Médico:</span> {doctor.full_name}
+                            </div>
+                            {f'<div class="info-item"><span class="info-label">Motivo:</span> {db_appointment.reason}</div>' if db_appointment.reason else ''}
+                        </div>
+                        
+                        <p style="text-align: center;">
+                            <a href="{appointment_url}" class="button">Ver Detalhes do Agendamento</a>
+                        </p>
+                        
+                        <p><strong>Lembrete:</strong> Por favor, chegue com 15 minutos de antecedência.</p>
+                    </div>
+                    <div class="footer">
+                        <p>Atenciosamente,<br/><strong>{clinic.name if clinic else 'Equipe Prontivus'}</strong></p>
+                        <p style="margin-top: 20px; font-size: 11px; color: #999;">
+                            Este é um e-mail automático. Por favor, não responda a esta mensagem.
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            text_body = (
+                f"Confirmação de Agendamento\n\n"
+                f"Olá {patient.first_name},\n\n"
+                f"Seu agendamento foi confirmado com sucesso!\n\n"
+                f"DADOS DO AGENDAMENTO:\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Data: {appointment_date}\n"
+                f"Horário: {appointment_time}\n"
+                f"Médico: {doctor.full_name}\n"
+                f"{f'Motivo: {db_appointment.reason}\n' if db_appointment.reason else ''}"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Lembrete: Por favor, chegue com 15 minutos de antecedência.\n\n"
+                f"Ver detalhes: {appointment_url}\n\n"
+                f"Atenciosamente,\n{clinic.name if clinic else 'Equipe Prontivus'}\n\n"
+                f"---\n"
+                f"Este é um e-mail automático. Por favor, não responda a esta mensagem."
+            )
+            
+            await email_service.send_email(
+                to_email=patient.email,
+                subject=f"Confirmação de Agendamento - {appointment_date} às {appointment_time}",
+                html_body=html_body,
+                text_body=text_body,
+            )
+        except Exception as e:
+            # Don't fail appointment creation if email sending fails
+            logger.error(f"Failed to send appointment confirmation email: {str(e)}")
 
     return response
 
@@ -1148,6 +1353,143 @@ async def update_appointment_status(
     response = AppointmentResponse.model_validate(db_appointment)
     response.patient_name = patient.full_name
     response.doctor_name = doctor.full_name
+    
+    # Send completion email with documents if appointment was completed
+    if status_update.status == AppointmentStatus.COMPLETED and patient.email:
+        try:
+            from app.services.email_service import email_service
+            from app.models import Clinic
+            from app.models.clinical import ClinicalRecord
+            from app.api.endpoints.documents import _get_consultation_data
+            from app.services.pdf_generator import PDFGenerator
+            
+            # Get clinic info
+            clinic_query = select(Clinic).filter(Clinic.id == current_user.clinic_id)
+            clinic_result = await db.execute(clinic_query)
+            clinic = clinic_result.scalar_one_or_none()
+            
+            # Format appointment date
+            appointment_date = db_appointment.scheduled_datetime.strftime("%d/%m/%Y")
+            appointment_time = db_appointment.scheduled_datetime.strftime("%H:%M")
+            
+            # Get frontend URL
+            frontend_url = os.getenv("FRONTEND_URL", "https://prontivus-frontend-p2rr.vercel.app")
+            appointment_url = f"{frontend_url}/portal/appointments/{db_appointment.id}"
+            
+            # Prepare attachments
+            attachments = []
+            
+            # Generate consultation PDF if clinical record exists
+            try:
+                # Check if clinical record exists
+                clinical_record_query = select(ClinicalRecord).filter(
+                    ClinicalRecord.appointment_id == appointment_id
+                )
+                clinical_record_result = await db.execute(clinical_record_query)
+                clinical_record = clinical_record_result.scalar_one_or_none()
+                
+                if clinical_record:
+                    # Get consultation data
+                    consultation_data = await _get_consultation_data(appointment_id, current_user, db)
+                    
+                    # Generate PDF
+                    pdf_generator = PDFGenerator()
+                    pdf_bytes = pdf_generator.generate_consultation_report(consultation_data)
+                    
+                    # Add PDF as attachment
+                    filename = f"consulta_{appointment_id}_{now.strftime('%Y%m%d_%H%M%S')}.pdf"
+                    attachments.append((filename, pdf_bytes, "application/pdf"))
+            except Exception as pdf_error:
+                logger.warning(f"Failed to generate consultation PDF for email: {str(pdf_error)}")
+                # Continue without PDF attachment
+            
+            # Create email content
+            html_body = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ background-color: #10b981; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
+                    .content {{ background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; }}
+                    .info-box {{ background-color: white; padding: 20px; margin: 20px 0; border-left: 4px solid #10b981; }}
+                    .info-item {{ margin: 10px 0; padding: 8px; }}
+                    .info-label {{ font-weight: bold; color: #10b981; }}
+                    .button {{ display: inline-block; padding: 12px 24px; background-color: #10b981; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+                    .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+                    .attachment-note {{ background-color: #e0f2fe; padding: 15px; margin: 20px 0; border-radius: 5px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Atendimento Concluído</h1>
+                    </div>
+                    <div class="content">
+                        <p>Olá <strong>{patient.first_name}</strong>,</p>
+                        <p>Seu atendimento foi concluído com sucesso!</p>
+                        
+                        <div class="info-box">
+                            <div class="info-item">
+                                <span class="info-label">Data:</span> {appointment_date}
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Horário:</span> {appointment_time}
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Médico:</span> {doctor.full_name}
+                            </div>
+                        </div>
+                        
+                        {f'<div class="attachment-note"><strong>📎 Documentos:</strong> Os documentos da consulta foram anexados a este e-mail.</div>' if attachments else ''}
+                        
+                        <p style="text-align: center;">
+                            <a href="{appointment_url}" class="button">Ver Detalhes do Atendimento</a>
+                        </p>
+                        
+                        <p>Obrigado por escolher <strong>{clinic.name if clinic else 'nossa clínica'}</strong>!</p>
+                    </div>
+                    <div class="footer">
+                        <p>Atenciosamente,<br/><strong>{clinic.name if clinic else 'Equipe Prontivus'}</strong></p>
+                        <p style="margin-top: 20px; font-size: 11px; color: #999;">
+                            Este é um e-mail automático. Por favor, não responda a esta mensagem.
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            text_body = (
+                f"Atendimento Concluído\n\n"
+                f"Olá {patient.first_name},\n\n"
+                f"Seu atendimento foi concluído com sucesso!\n\n"
+                f"DADOS DO ATENDIMENTO:\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Data: {appointment_date}\n"
+                f"Horário: {appointment_time}\n"
+                f"Médico: {doctor.full_name}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"{'📎 Os documentos da consulta foram anexados a este e-mail.\n\n' if attachments else ''}"
+                f"Ver detalhes: {appointment_url}\n\n"
+                f"Obrigado por escolher {clinic.name if clinic else 'nossa clínica'}!\n\n"
+                f"Atenciosamente,\n{clinic.name if clinic else 'Equipe Prontivus'}\n\n"
+                f"---\n"
+                f"Este é um e-mail automático. Por favor, não responda a esta mensagem."
+            )
+            
+            await email_service.send_email(
+                to_email=patient.email,
+                subject=f"Atendimento Concluído - {appointment_date}",
+                html_body=html_body,
+                text_body=text_body,
+                attachments=attachments if attachments else None,
+            )
+        except Exception as e:
+            # Don't fail status update if email sending fails
+            logger.error(f"Failed to send completion email: {str(e)}")
     
     # Broadcast status change
     await appointment_realtime_manager.broadcast(

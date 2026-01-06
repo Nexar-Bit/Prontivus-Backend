@@ -21,6 +21,7 @@ from app.models import (
     ServiceCategory, InvoiceStatus, Procedure, Payment, PaymentMethod, PaymentStatus,
     InsurancePlan, PreAuthRequest, PreAuthStatus, Expense, ExpenseStatus
 )
+from app.models.financial import Budget, BudgetLine, BudgetStatus
 from app.schemas.financial import (
     ServiceItemCreate, ServiceItemUpdate, ServiceItemResponse,
     InvoiceCreate, InvoiceUpdate, InvoiceResponse, InvoiceDetailResponse,
@@ -30,7 +31,9 @@ from app.schemas.financial import (
     InsurancePlanCreate, InsurancePlanUpdate, InsurancePlanResponse,
     PreAuthRequestCreate, PreAuthRequestUpdate, PreAuthRequestResponse,
     AccountsReceivableSummary, AgingReport,
-    ExpenseCreate, ExpenseUpdate, ExpenseResponse
+    ExpenseCreate, ExpenseUpdate, ExpenseResponse,
+    BudgetCreate, BudgetUpdate, BudgetResponse, BudgetDetailResponse,
+    BudgetLineCreate, BudgetLineResponse
 )
 from app.services.stock_consumption_service import consume_stock_for_procedure, check_stock_availability_for_procedure
 
@@ -1713,3 +1716,464 @@ async def get_aging_report(
         items=items,
         generated_at=datetime.now()
     )
+
+
+# ==================== Budgets ====================
+
+@router.get("/budgets", response_model=List[BudgetResponse])
+async def get_budgets(
+    patient_id: Optional[int] = Query(None, description="Filter by patient ID"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get list of budgets
+    """
+    query = select(Budget).filter(Budget.clinic_id == current_user.clinic_id)
+    
+    if patient_id:
+        query = query.filter(Budget.patient_id == patient_id)
+    if status:
+        query = query.filter(Budget.status == status)
+    
+    result = await db.execute(query.order_by(Budget.created_at.desc()))
+    budgets = result.scalars().all()
+    
+    # Add patient names
+    response_list = []
+    for budget in budgets:
+        budget_dict = BudgetResponse.model_validate(budget).model_dump()
+        if budget.patient:
+            budget_dict['patient_name'] = budget.patient.full_name
+        if budget.appointment:
+            budget_dict['appointment_date'] = budget.appointment.scheduled_datetime
+        if budget.creator:
+            budget_dict['creator_name'] = budget.creator.full_name
+        response_list.append(BudgetResponse(**budget_dict))
+    
+    return response_list
+
+
+@router.get("/budgets/{budget_id}", response_model=BudgetDetailResponse)
+async def get_budget(
+    budget_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get a specific budget by ID
+    """
+    query = select(Budget).options(
+        selectinload(Budget.patient),
+        selectinload(Budget.appointment).selectinload(Appointment.doctor),
+        selectinload(Budget.budget_lines).selectinload(BudgetLine.service_item),
+        selectinload(Budget.budget_lines).selectinload(BudgetLine.procedure),
+        selectinload(Budget.creator),
+    ).filter(
+        and_(
+            Budget.id == budget_id,
+            Budget.clinic_id == current_user.clinic_id
+        )
+    )
+    
+    result = await db.execute(query)
+    budget = result.unique().scalar_one_or_none()
+    
+    if not budget:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Budget not found"
+        )
+    
+    # Build response
+    budget_dict = {
+        'id': budget.id,
+        'patient_id': budget.patient_id,
+        'appointment_id': budget.appointment_id,
+        'clinic_id': budget.clinic_id,
+        'created_by': budget.created_by,
+        'issue_date': budget.issue_date,
+        'valid_until': budget.valid_until,
+        'status': budget.status.value if hasattr(budget.status, 'value') else str(budget.status),
+        'total_amount': budget.total_amount,
+        'notes': budget.notes,
+        'created_at': budget.created_at,
+        'updated_at': budget.updated_at,
+        'sent_at': budget.sent_at,
+        'accepted_at': budget.accepted_at,
+        'rejected_at': budget.rejected_at,
+        'converted_to_invoice_id': budget.converted_to_invoice_id,
+        'patient_name': budget.patient.full_name if budget.patient else '',
+        'appointment_date': budget.appointment.scheduled_datetime if budget.appointment else None,
+        'doctor_name': budget.appointment.doctor.full_name if budget.appointment and budget.appointment.doctor else None,
+        'budget_lines': [
+            {
+                'id': line.id,
+                'service_item_id': line.service_item_id,
+                'procedure_id': line.procedure_id,
+                'quantity': line.quantity,
+                'unit_price': line.unit_price,
+                'line_total': line.line_total,
+                'description': line.description,
+                'created_at': line.created_at,
+                'service_item': {
+                    'id': line.service_item.id,
+                    'name': line.service_item.name,
+                    'description': line.service_item.description,
+                    'code': line.service_item.code,
+                    'price': line.service_item.price,
+                    'category': line.service_item.category.value if hasattr(line.service_item.category, 'value') else str(line.service_item.category),
+                    'is_active': line.service_item.is_active,
+                    'created_at': line.service_item.created_at,
+                    'updated_at': line.service_item.updated_at,
+                } if line.service_item else None,
+                'procedure_name': line.procedure.name if line.procedure else None,
+            }
+            for line in budget.budget_lines
+        ],
+    }
+    
+    return BudgetDetailResponse(**budget_dict)
+
+
+@router.post("/budgets", response_model=BudgetDetailResponse, status_code=status.HTTP_201_CREATED)
+async def create_budget(
+    budget_data: BudgetCreate,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a new budget/estimate
+    """
+    # Verify patient exists
+    patient_query = select(Patient).filter(
+        and_(
+            Patient.id == budget_data.patient_id,
+            Patient.clinic_id == current_user.clinic_id
+        )
+    )
+    patient_result = await db.execute(patient_query)
+    patient = patient_result.scalar_one_or_none()
+    
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Patient not found"
+        )
+    
+    # Verify appointment if provided
+    if budget_data.appointment_id:
+        appointment_query = select(Appointment).filter(
+            and_(
+                Appointment.id == budget_data.appointment_id,
+                Appointment.patient_id == budget_data.patient_id,
+                Appointment.clinic_id == current_user.clinic_id
+            )
+        )
+        appointment_result = await db.execute(appointment_query)
+        appointment = appointment_result.scalar_one_or_none()
+        
+        if not appointment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Appointment not found"
+            )
+    
+    # Create budget
+    db_budget = Budget(
+        clinic_id=current_user.clinic_id,
+        patient_id=budget_data.patient_id,
+        appointment_id=budget_data.appointment_id,
+        valid_until=budget_data.valid_until,
+        notes=budget_data.notes,
+        status=BudgetStatus.DRAFT,
+        created_by=current_user.id,
+    )
+    db.add(db_budget)
+    await db.flush()  # Get the budget ID
+    
+    # Create budget lines
+    total_amount = Decimal('0.00')
+    for line_data in budget_data.service_items:
+        # Verify service_item or procedure exists
+        if line_data.service_item_id:
+            service_item_query = select(ServiceItem).filter(
+                and_(
+                    ServiceItem.id == line_data.service_item_id,
+                    ServiceItem.clinic_id == current_user.clinic_id
+                )
+            )
+            service_item_result = await db.execute(service_item_query)
+            service_item = service_item_result.scalar_one_or_none()
+            
+            if not service_item:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Service item {line_data.service_item_id} not found"
+                )
+            
+            # Use service item price if unit_price not provided
+            unit_price = line_data.unit_price if line_data.unit_price else service_item.price
+        
+        elif line_data.procedure_id:
+            procedure_query = select(Procedure).filter(
+                and_(
+                    Procedure.id == line_data.procedure_id,
+                    Procedure.clinic_id == current_user.clinic_id
+                )
+            )
+            procedure_result = await db.execute(procedure_query)
+            procedure = procedure_result.scalar_one_or_none()
+            
+            if not procedure:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Procedure {line_data.procedure_id} not found"
+                )
+            
+            # Use procedure price if unit_price not provided
+            unit_price = line_data.unit_price if line_data.unit_price else (procedure.price or Decimal('0.00'))
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Budget line must have either service_item_id or procedure_id"
+            )
+        
+        # Calculate line total
+        line_total = line_data.quantity * unit_price
+        
+        db_line = BudgetLine(
+            budget_id=db_budget.id,
+            service_item_id=line_data.service_item_id,
+            procedure_id=line_data.procedure_id,
+            quantity=line_data.quantity,
+            unit_price=unit_price,
+            line_total=line_total,
+            description=line_data.description
+        )
+        db.add(db_line)
+        total_amount += line_total
+    
+    # Update budget total
+    db_budget.total_amount = total_amount
+    
+    await db.commit()
+    await db.refresh(db_budget)
+    
+    # Return detailed response
+    return await get_budget(db_budget.id, current_user, db)
+
+
+@router.put("/budgets/{budget_id}", response_model=BudgetDetailResponse)
+async def update_budget(
+    budget_id: int,
+    budget_data: BudgetUpdate,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update a budget
+    """
+    query = select(Budget).filter(
+        and_(
+            Budget.id == budget_id,
+            Budget.clinic_id == current_user.clinic_id
+        )
+    )
+    result = await db.execute(query)
+    db_budget = result.scalar_one_or_none()
+    
+    if not db_budget:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Budget not found"
+        )
+    
+    # Update fields
+    update_data = budget_data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        if field == 'status' and value:
+            db_budget.status = BudgetStatus(value)
+            # Update timestamps based on status
+            now = datetime.now(timezone.utc)
+            if value == BudgetStatus.SENT.value and not db_budget.sent_at:
+                db_budget.sent_at = now
+            elif value == BudgetStatus.ACCEPTED.value and not db_budget.accepted_at:
+                db_budget.accepted_at = now
+            elif value == BudgetStatus.REJECTED.value and not db_budget.rejected_at:
+                db_budget.rejected_at = now
+        else:
+            setattr(db_budget, field, value)
+    
+    await db.commit()
+    await db.refresh(db_budget)
+    
+    return await get_budget(budget_id, current_user, db)
+
+
+@router.post("/budgets/{budget_id}/convert-to-invoice", response_model=InvoiceDetailResponse, status_code=status.HTTP_201_CREATED)
+async def convert_budget_to_invoice(
+    budget_id: int,
+    due_date: Optional[datetime] = Query(None, description="Invoice due date"),
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Convert an accepted budget to an invoice
+    """
+    # Get budget
+    budget_query = select(Budget).options(
+        selectinload(Budget.budget_lines),
+        selectinload(Budget.patient),
+    ).filter(
+        and_(
+            Budget.id == budget_id,
+            Budget.clinic_id == current_user.clinic_id
+        )
+    )
+    budget_result = await db.execute(budget_query)
+    budget = budget_result.unique().scalar_one_or_none()
+    
+    if not budget:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Budget not found"
+        )
+    
+    if budget.status != BudgetStatus.ACCEPTED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only accepted budgets can be converted to invoices"
+        )
+    
+    if budget.converted_to_invoice_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Budget has already been converted to an invoice"
+        )
+    
+    # Create invoice from budget
+    from datetime import timedelta
+    
+    invoice = Invoice(
+        clinic_id=budget.clinic_id,
+        patient_id=budget.patient_id,
+        appointment_id=budget.appointment_id,
+        due_date=due_date or (datetime.now(timezone.utc) + timedelta(days=30)),
+        notes=budget.notes,
+        status=InvoiceStatus.ISSUED,
+        total_amount=budget.total_amount
+    )
+    db.add(invoice)
+    await db.flush()
+    
+    # Create invoice lines from budget lines
+    for budget_line in budget.budget_lines:
+        invoice_line = InvoiceLine(
+            invoice_id=invoice.id,
+            service_item_id=budget_line.service_item_id,
+            procedure_id=budget_line.procedure_id,
+            quantity=budget_line.quantity,
+            unit_price=budget_line.unit_price,
+            line_total=budget_line.line_total,
+            description=budget_line.description
+        )
+        db.add(invoice_line)
+    
+    # Update budget status
+    budget.status = BudgetStatus.CONVERTED
+    budget.converted_to_invoice_id = invoice.id
+    
+    await db.commit()
+    await db.refresh(invoice)
+    
+    # Return invoice detail using the existing get_invoice function
+    # We can call it directly since it's in the same module
+    return await get_invoice(invoice.id, current_user, db)
+
+
+# ==================== Billing Alerts ====================
+
+@router.get("/billing-alerts/overdue", response_model=List[dict])
+async def get_overdue_invoices(
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get list of overdue invoices with alerts
+    """
+    from app.services.billing_alert_service import billing_alert_service
+    
+    alerts = await billing_alert_service.check_overdue_invoices(
+        clinic_id=current_user.clinic_id,
+        db=db,
+        send_notifications=False  # Don't send notifications on GET request
+    )
+    
+    return alerts
+
+
+@router.get("/billing-alerts/upcoming", response_model=List[dict])
+async def get_upcoming_due_invoices(
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get list of invoices with upcoming due dates
+    """
+    from app.services.billing_alert_service import billing_alert_service
+    
+    alerts = await billing_alert_service.check_upcoming_due_dates(
+        clinic_id=current_user.clinic_id,
+        db=db,
+        send_notifications=False  # Don't send notifications on GET request
+    )
+    
+    return alerts
+
+
+@router.post("/billing-alerts/send-overdue", response_model=dict)
+async def send_overdue_alerts(
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Check and send alerts for overdue invoices
+    """
+    from app.services.billing_alert_service import billing_alert_service
+    
+    alerts = await billing_alert_service.check_overdue_invoices(
+        clinic_id=current_user.clinic_id,
+        db=db,
+        send_notifications=True
+    )
+    
+    return {
+        "message": f"Processed {len(alerts)} overdue invoice alerts",
+        "count": len(alerts),
+        "alerts": alerts
+    }
+
+
+@router.post("/billing-alerts/send-upcoming", response_model=dict)
+async def send_upcoming_due_alerts(
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Check and send alerts for upcoming invoice due dates
+    """
+    from app.services.billing_alert_service import billing_alert_service
+    
+    alerts = await billing_alert_service.check_upcoming_due_dates(
+        clinic_id=current_user.clinic_id,
+        db=db,
+        send_notifications=True
+    )
+    
+    return {
+        "message": f"Processed {len(alerts)} upcoming due date alerts",
+        "count": len(alerts),
+        "alerts": alerts
+    }
