@@ -5,6 +5,7 @@ Supports multiple providers (Twilio, AWS SNS, etc.)
 """
 import os
 import re
+import asyncio
 from typing import Optional
 from datetime import datetime
 import logging
@@ -16,22 +17,30 @@ class SMSService:
     """Service for sending SMS notifications"""
     
     def __init__(self):
-        # Try to get from config first, then fall back to environment
-        try:
-            from config import settings
-            self.provider = os.getenv("SMS_PROVIDER", "twilio").lower()
-            self.twilio_account_sid = settings.SMS_TWILIO_ACCOUNT_SID if hasattr(settings, 'SMS_TWILIO_ACCOUNT_SID') else os.getenv("SMS_TWILIO_ACCOUNT_SID", "")
-            self.twilio_auth_token = settings.SMS_TWILIO_AUTH_TOKEN if hasattr(settings, 'SMS_TWILIO_AUTH_TOKEN') else os.getenv("SMS_TWILIO_AUTH_TOKEN", "")
-            self.twilio_from_number = settings.SMS_TWILIO_FROM_NUMBER if hasattr(settings, 'SMS_TWILIO_FROM_NUMBER') else os.getenv("SMS_TWILIO_FROM_NUMBER", "")
-        except:
-            self.provider = os.getenv("SMS_PROVIDER", "twilio").lower()
-            self.twilio_account_sid = os.getenv("SMS_TWILIO_ACCOUNT_SID", "")
-            self.twilio_auth_token = os.getenv("SMS_TWILIO_AUTH_TOKEN", "")
-            self.twilio_from_number = os.getenv("SMS_TWILIO_FROM_NUMBER", "")
+        # Load from environment variables first (highest priority), then config
+        # Environment variables are loaded by python-dotenv in main.py before this module imports
+        self.provider = os.getenv("SMS_PROVIDER", "twilio").lower()
+        self.twilio_account_sid = os.getenv("SMS_TWILIO_ACCOUNT_SID", "")
+        self.twilio_auth_token = os.getenv("SMS_TWILIO_AUTH_TOKEN", "")
+        self.twilio_from_number = os.getenv("SMS_TWILIO_FROM_NUMBER", "")
+        
+        # Fall back to config if environment variables are not set
+        if not self.twilio_account_sid or not self.twilio_auth_token or not self.twilio_from_number:
+            try:
+                from config import settings
+                self.provider = self.provider or getattr(settings, 'SMS_PROVIDER', 'twilio').lower()
+                self.twilio_account_sid = self.twilio_account_sid or getattr(settings, 'SMS_TWILIO_ACCOUNT_SID', '')
+                self.twilio_auth_token = self.twilio_auth_token or getattr(settings, 'SMS_TWILIO_AUTH_TOKEN', '')
+                self.twilio_from_number = self.twilio_from_number or getattr(settings, 'SMS_TWILIO_FROM_NUMBER', '')
+            except Exception as e:
+                logger.debug(f"Could not load SMS settings from config: {e}")
         
         self.enabled = bool(self.twilio_account_sid and self.twilio_auth_token and self.twilio_from_number)
         
-        if not self.enabled:
+        if self.enabled:
+            logger.info(f"SMS service enabled with provider: {self.provider}")
+            logger.debug(f"SMS FROM number: {self.twilio_from_number}")
+        else:
             logger.warning("SMS service is disabled. SMS credentials not configured.")
     
     def is_enabled(self) -> bool:
@@ -123,18 +132,22 @@ class SMSService:
             return False
     
     async def _send_via_twilio(self, to_phone: str, message: str) -> bool:
-        """Send SMS via Twilio"""
+        """Send SMS via Twilio (runs sync Twilio client in thread pool)"""
         try:
             from twilio.rest import Client
             
-            client = Client(self.twilio_account_sid, self.twilio_auth_token)
+            def _send_sync():
+                """Synchronous function to send SMS via Twilio"""
+                client = Client(self.twilio_account_sid, self.twilio_auth_token)
+                twilio_message = client.messages.create(
+                    body=message,
+                    from_=self.twilio_from_number,
+                    to=to_phone
+                )
+                return twilio_message
             
-            # Send SMS
-            twilio_message = client.messages.create(
-                body=message,
-                from_=self.twilio_from_number,
-                to=to_phone
-            )
+            # Run synchronous Twilio client in thread pool to avoid blocking event loop
+            twilio_message = await asyncio.to_thread(_send_sync)
             
             logger.info(f"SMS sent successfully to {to_phone} via Twilio. SID: {twilio_message.sid}")
             return True
@@ -143,7 +156,7 @@ class SMSService:
             logger.error("twilio library not installed. Install with: pip install twilio")
             return False
         except Exception as e:
-            logger.error(f"Twilio error: {str(e)}")
+            logger.error(f"Twilio error sending SMS to {to_phone}: {str(e)}")
             return False
     
     async def send_notification_sms(
