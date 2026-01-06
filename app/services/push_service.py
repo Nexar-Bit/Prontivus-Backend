@@ -107,6 +107,11 @@ class PushService:
             # Decode private key if it's base64url encoded (from .env)
             # pywebpush accepts PEM format directly
             private_key = self.vapid_private_key
+            
+            # Handle single-line PEM format with \n escape sequences (from .env)
+            if '\\n' in private_key:
+                private_key = private_key.replace('\\n', '\n')
+            
             try:
                 # Try to decode if it's base64url encoded
                 if not private_key.startswith('-----BEGIN'):
