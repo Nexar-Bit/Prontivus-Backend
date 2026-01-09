@@ -103,7 +103,7 @@ app.add_middleware(
     allow_origins=cors_origins,
     # Always allow localhost origins for development (mobile web, etc.)
     # In production, explicit origins should be set via BACKEND_CORS_ORIGINS
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
     allow_headers=["*"],
@@ -417,4 +417,5 @@ if __name__ == "__main__":
         port=8000,
         reload=True
     )
+
 
