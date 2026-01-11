@@ -98,6 +98,16 @@ app = FastAPI(
 )
 # Configure CORS FIRST so headers are present even on errors
 cors_origins = get_cors_origins()
+cors_env = os.getenv("BACKEND_CORS_ORIGINS", "")
+
+# Log CORS configuration on startup
+print("=" * 60)
+print("🔐 CORS Configuration:")
+print(f"   BACKEND_CORS_ORIGINS env: {cors_env if cors_env else '(not set)'}")
+print(f"   Allowed origins count: {len(cors_origins)}")
+print(f"   Allowed origins: {', '.join(cors_origins[:3])}{'...' if len(cors_origins) > 3 else ''}")
+print("=" * 60)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
@@ -408,6 +418,21 @@ async def health_check():
         "status": "healthy",
         "service": "Prontivus API",
         "version": "1.0.0"
+    }
+
+@app.get("/api/cors-info")
+async def cors_info(request: Request):
+    """Diagnostic endpoint to check CORS configuration"""
+    origin = request.headers.get("origin", "No Origin header")
+    allowed_origins = get_cors_origins()
+    cors_env = os.getenv("BACKEND_CORS_ORIGINS", "NOT SET")
+    
+    return {
+        "request_origin": origin,
+        "cors_env_value": cors_env,
+        "allowed_origins": allowed_origins,
+        "origin_in_allowed": origin in allowed_origins if origin != "No Origin header" else None,
+        "message": "This endpoint shows CORS configuration for debugging"
     }
 
 if __name__ == "__main__":
