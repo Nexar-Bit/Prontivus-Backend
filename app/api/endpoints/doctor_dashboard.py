@@ -12,7 +12,8 @@ from sqlalchemy.orm import joinedload, selectinload
 from app.core.auth import get_current_user
 from app.models import User, Patient, Appointment, AppointmentStatus, UserRole
 from app.models.clinical import ClinicalRecord, Prescription, ExamRequest
-from app.models.financial import Invoice, Payment, InvoiceStatus, PaymentStatus
+from app.models.financial import Invoice, Payment, InvoiceStatus, PaymentStatus, InvoiceLine
+from app.models.procedure import Procedure
 from database import get_async_session
 from pydantic import BaseModel
 
@@ -21,12 +22,24 @@ router = APIRouter(prefix="/doctor", tags=["Doctor Dashboard"])
 
 # ==================== Response Models ====================
 
+class PeriodStats(BaseModel):
+    """Statistics for a period (day/week/month)"""
+    day: int
+    week: int
+    month: int
+
 class DoctorDashboardStats(BaseModel):
-    """Doctor dashboard statistics"""
-    today_appointments_count: int
-    queue_patients_count: int
-    pending_records_count: int
-    monthly_revenue: float
+    """Doctor dashboard statistics with day/week/month breakdown"""
+    # Appointments statistics
+    appointments: PeriodStats
+    # Patients in queue statistics
+    queue_patients: PeriodStats
+    # Pending records statistics
+    pending_records: PeriodStats
+    # Revenue statistics (day/week/month)
+    revenue_day: float
+    revenue_week: float
+    revenue_month: float
     
     class Config:
         json_encoders = {
@@ -48,10 +61,17 @@ class UpcomingAppointmentResponse(BaseModel):
         }
 
 
+class WeeklySummary(BaseModel):
+    """Weekly summary statistics"""
+    procedures_count: int
+    new_consultations_count: int
+    returns_count: int
+
 class DoctorDashboardResponse(BaseModel):
     """Doctor dashboard response"""
     stats: DoctorDashboardStats
     upcoming_appointments: List[UpcomingAppointmentResponse]
+    weekly_summary: Optional[WeeklySummary] = None
     
     class Config:
         json_encoders = {
@@ -97,10 +117,14 @@ async def get_doctor_dashboard(
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start + timedelta(days=1)
         
-        # Month start for revenue calculation
+        # Week start (last 7 days for weekly stats)
+        week_start = today_start - timedelta(days=6)
+        
+        # Month start for monthly calculation
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-        # ==================== Get Today's Appointments ====================
+        # ==================== Get Appointments Statistics (Day/Week/Month) ====================
+        # Today appointments
         today_appointments_query = select(Appointment, Patient).join(
             Patient, Appointment.patient_id == Patient.id
         ).filter(
@@ -111,14 +135,37 @@ async def get_doctor_dashboard(
                 Appointment.scheduled_datetime < today_end
             )
         ).order_by(Appointment.scheduled_datetime)
-        
         appointments_result = await db.execute(today_appointments_query)
         appointments_data = appointments_result.all()
+        appointments_day = len(appointments_data)
         
-        today_appointments_count = len(appointments_data)
+        # Weekly appointments (last 7 days)
+        appointments_week_query = select(func.count(Appointment.id)).filter(
+            and_(
+                Appointment.doctor_id == current_user.id,
+                Appointment.clinic_id == current_user.clinic_id,
+                Appointment.scheduled_datetime >= week_start,
+                Appointment.scheduled_datetime < today_end
+            )
+        )
+        appointments_week_result = await db.execute(appointments_week_query)
+        appointments_week = appointments_week_result.scalar() or 0
         
-        # ==================== Get Queue Patients (Checked In or In Consultation) ====================
-        queue_query = select(func.count(Appointment.id)).filter(
+        # Monthly appointments
+        appointments_month_query = select(func.count(Appointment.id)).filter(
+            and_(
+                Appointment.doctor_id == current_user.id,
+                Appointment.clinic_id == current_user.clinic_id,
+                Appointment.scheduled_datetime >= month_start,
+                Appointment.scheduled_datetime < today_end
+            )
+        )
+        appointments_month_result = await db.execute(appointments_month_query)
+        appointments_month = appointments_month_result.scalar() or 0
+        
+        # ==================== Get Queue Patients Statistics (Day/Week/Month) ====================
+        # Day: Current queue (no date filter, it's a current state)
+        queue_day_query = select(func.count(Appointment.id)).filter(
             and_(
                 Appointment.doctor_id == current_user.id,
                 Appointment.clinic_id == current_user.clinic_id,
@@ -128,46 +175,91 @@ async def get_doctor_dashboard(
                 ])
             )
         )
-        queue_result = await db.execute(queue_query)
-        queue_patients_count = queue_result.scalar() or 0
+        queue_day_result = await db.execute(queue_day_query)
+        queue_patients_day = queue_day_result.scalar() or 0
         
-        # ==================== Get Pending Clinical Records ====================
-        # Count appointments with clinical records that are incomplete
-        # This is a simplified check - you might want to add a status field to ClinicalRecord
-        pending_records_query = select(func.count(ClinicalRecord.id)).join(
-            Appointment, ClinicalRecord.appointment_id == Appointment.id
-        ).filter(
+        # Week: Count of appointments that were in queue during the week (simplified - using scheduled_datetime)
+        queue_week_query = select(func.count(Appointment.id)).filter(
             and_(
                 Appointment.doctor_id == current_user.id,
                 Appointment.clinic_id == current_user.clinic_id,
-                Appointment.status == AppointmentStatus.COMPLETED,
-                # Check if record is incomplete (no prescriptions or exam requests)
-                # This is a simplified check
+                Appointment.scheduled_datetime >= week_start,
+                Appointment.scheduled_datetime < today_end,
+                Appointment.status.in_([
+                    AppointmentStatus.CHECKED_IN,
+                    AppointmentStatus.IN_CONSULTATION,
+                    AppointmentStatus.SCHEDULED
+                ])
             )
         )
-        pending_records_result = await db.execute(pending_records_query)
-        pending_records_count = pending_records_result.scalar() or 0
+        queue_week_result = await db.execute(queue_week_query)
+        queue_patients_week = queue_week_result.scalar() or 0
         
-        # Alternative: Count completed appointments without clinical records
-        appointments_without_records_query = select(func.count(Appointment.id)).outerjoin(
+        # Month: Count of appointments scheduled this month
+        queue_month_query = select(func.count(Appointment.id)).filter(
+            and_(
+                Appointment.doctor_id == current_user.id,
+                Appointment.clinic_id == current_user.clinic_id,
+                Appointment.scheduled_datetime >= month_start,
+                Appointment.scheduled_datetime < today_end
+            )
+        )
+        queue_month_result = await db.execute(queue_month_query)
+        queue_patients_month = queue_month_result.scalar() or 0
+        
+        # ==================== Get Pending Clinical Records Statistics (Day/Week/Month) ====================
+        # Day: Count appointments completed today without records
+        pending_records_day_query = select(func.count(Appointment.id)).outerjoin(
             ClinicalRecord, Appointment.id == ClinicalRecord.appointment_id
         ).filter(
             and_(
                 Appointment.doctor_id == current_user.id,
                 Appointment.clinic_id == current_user.clinic_id,
                 Appointment.status == AppointmentStatus.COMPLETED,
+                Appointment.completed_at >= today_start,
+                Appointment.completed_at < today_end,
                 ClinicalRecord.id.is_(None)
             )
         )
-        appointments_without_records_result = await db.execute(appointments_without_records_query)
-        appointments_without_records = appointments_without_records_result.scalar() or 0
+        pending_records_day_result = await db.execute(pending_records_day_query)
+        pending_records_day = pending_records_day_result.scalar() or 0
         
-        # Use the count of appointments without records as pending records
-        pending_records_count = appointments_without_records
+        # Week: Count appointments completed this week without records
+        pending_records_week_query = select(func.count(Appointment.id)).outerjoin(
+            ClinicalRecord, Appointment.id == ClinicalRecord.appointment_id
+        ).filter(
+            and_(
+                Appointment.doctor_id == current_user.id,
+                Appointment.clinic_id == current_user.clinic_id,
+                Appointment.status == AppointmentStatus.COMPLETED,
+                Appointment.completed_at >= week_start,
+                Appointment.completed_at < today_end,
+                ClinicalRecord.id.is_(None)
+            )
+        )
+        pending_records_week_result = await db.execute(pending_records_week_query)
+        pending_records_week = pending_records_week_result.scalar() or 0
         
-        # ==================== Get Monthly Revenue ====================
+        # Month: Count appointments completed this month without records
+        pending_records_month_query = select(func.count(Appointment.id)).outerjoin(
+            ClinicalRecord, Appointment.id == ClinicalRecord.appointment_id
+        ).filter(
+            and_(
+                Appointment.doctor_id == current_user.id,
+                Appointment.clinic_id == current_user.clinic_id,
+                Appointment.status == AppointmentStatus.COMPLETED,
+                Appointment.completed_at >= month_start,
+                Appointment.completed_at < today_end,
+                ClinicalRecord.id.is_(None)
+            )
+        )
+        pending_records_month_result = await db.execute(pending_records_month_query)
+        pending_records_month = pending_records_month_result.scalar() or 0
+        
+        # ==================== Get Revenue Statistics (Day/Week/Month) ====================
+        # Day revenue
         try:
-            revenue_query = select(func.coalesce(func.sum(Payment.amount), 0)).join(
+            revenue_day_query = select(func.coalesce(func.sum(Payment.amount), 0)).join(
                 Invoice, Payment.invoice_id == Invoice.id
             ).join(
                 Appointment, Invoice.appointment_id == Appointment.id
@@ -176,15 +268,54 @@ async def get_doctor_dashboard(
                     Appointment.doctor_id == current_user.id,
                     Appointment.clinic_id == current_user.clinic_id,
                     Payment.status == PaymentStatus.COMPLETED,
-                    Payment.created_at >= month_start
+                    Payment.created_at >= today_start,
+                    Payment.created_at < today_end
                 )
             )
-            revenue_result = await db.execute(revenue_query)
-            revenue_value = revenue_result.scalar()
-            monthly_revenue = float(revenue_value) if revenue_value is not None else 0.0
-        except Exception as e:
-            # If there's an error calculating revenue, default to 0
-            monthly_revenue = 0.0
+            revenue_day_result = await db.execute(revenue_day_query)
+            revenue_day = float(revenue_day_result.scalar() or 0)
+        except Exception:
+            revenue_day = 0.0
+        
+        # Week revenue
+        try:
+            revenue_week_query = select(func.coalesce(func.sum(Payment.amount), 0)).join(
+                Invoice, Payment.invoice_id == Invoice.id
+            ).join(
+                Appointment, Invoice.appointment_id == Appointment.id
+            ).filter(
+                and_(
+                    Appointment.doctor_id == current_user.id,
+                    Appointment.clinic_id == current_user.clinic_id,
+                    Payment.status == PaymentStatus.COMPLETED,
+                    Payment.created_at >= week_start,
+                    Payment.created_at < today_end
+                )
+            )
+            revenue_week_result = await db.execute(revenue_week_query)
+            revenue_week = float(revenue_week_result.scalar() or 0)
+        except Exception:
+            revenue_week = 0.0
+        
+        # Month revenue
+        try:
+            revenue_month_query = select(func.coalesce(func.sum(Payment.amount), 0)).join(
+                Invoice, Payment.invoice_id == Invoice.id
+            ).join(
+                Appointment, Invoice.appointment_id == Appointment.id
+            ).filter(
+                and_(
+                    Appointment.doctor_id == current_user.id,
+                    Appointment.clinic_id == current_user.clinic_id,
+                    Payment.status == PaymentStatus.COMPLETED,
+                    Payment.created_at >= month_start,
+                    Payment.created_at < today_end
+                )
+            )
+            revenue_month_result = await db.execute(revenue_month_query)
+            revenue_month = float(revenue_month_result.scalar() or 0)
+        except Exception:
+            revenue_month = 0.0
         
         # ==================== Build Upcoming Appointments List ====================
         upcoming_appointments = []
@@ -207,17 +338,86 @@ async def get_doctor_dashboard(
         # Sort by scheduled time
         upcoming_appointments.sort(key=lambda x: x.scheduled_datetime)
         
+        # ==================== Get Weekly Summary (Procedures, New Consultations, Returns) ====================
+        # Procedures count (from invoices with procedures in the last 7 days)
+        procedures_query = select(func.count(func.distinct(InvoiceLine.id))).join(
+            Invoice, InvoiceLine.invoice_id == Invoice.id
+        ).join(
+            Appointment, Invoice.appointment_id == Appointment.id
+        ).filter(
+            and_(
+                Appointment.doctor_id == current_user.id,
+                Appointment.clinic_id == current_user.clinic_id,
+                InvoiceLine.procedure_id.isnot(None),
+                Invoice.created_at >= week_start,
+                Invoice.created_at < today_end
+            )
+        )
+        procedures_result = await db.execute(procedures_query)
+        procedures_count = procedures_result.scalar() or 0
+        
+        # New consultations count (appointments without previous appointments for the same patient)
+        # For simplicity, we'll count appointments where appointment_type is not 'follow-up' or 'return'
+        new_consultations_query = select(func.count(Appointment.id)).filter(
+            and_(
+                Appointment.doctor_id == current_user.id,
+                Appointment.clinic_id == current_user.clinic_id,
+                Appointment.scheduled_datetime >= week_start,
+                Appointment.scheduled_datetime < today_end,
+                or_(
+                    Appointment.appointment_type.is_(None),
+                    Appointment.appointment_type.notin_(['follow-up', 'return', 'retorno'])
+                )
+            )
+        )
+        new_consultations_result = await db.execute(new_consultations_query)
+        new_consultations_count = new_consultations_result.scalar() or 0
+        
+        # Returns count (appointments with appointment_type 'follow-up' or 'return')
+        returns_query = select(func.count(Appointment.id)).filter(
+            and_(
+                Appointment.doctor_id == current_user.id,
+                Appointment.clinic_id == current_user.clinic_id,
+                Appointment.scheduled_datetime >= week_start,
+                Appointment.scheduled_datetime < today_end,
+                Appointment.appointment_type.in_(['follow-up', 'return', 'retorno'])
+            )
+        )
+        returns_result = await db.execute(returns_query)
+        returns_count = returns_result.scalar() or 0
+        
+        weekly_summary = WeeklySummary(
+            procedures_count=procedures_count,
+            new_consultations_count=new_consultations_count,
+            returns_count=returns_count
+        )
+        
         # ==================== Build Response ====================
         stats = DoctorDashboardStats(
-            today_appointments_count=today_appointments_count,
-            queue_patients_count=queue_patients_count,
-            pending_records_count=pending_records_count,
-            monthly_revenue=monthly_revenue
+            appointments=PeriodStats(
+                day=appointments_day,
+                week=appointments_week,
+                month=appointments_month
+            ),
+            queue_patients=PeriodStats(
+                day=queue_patients_day,
+                week=queue_patients_week,
+                month=queue_patients_month
+            ),
+            pending_records=PeriodStats(
+                day=pending_records_day,
+                week=pending_records_week,
+                month=pending_records_month
+            ),
+            revenue_day=revenue_day,
+            revenue_week=revenue_week,
+            revenue_month=revenue_month
         )
         
         return DoctorDashboardResponse(
             stats=stats,
-            upcoming_appointments=upcoming_appointments[:10]  # Limit to 10 most recent
+            upcoming_appointments=upcoming_appointments[:10],  # Limit to 10 most recent
+            weekly_summary=weekly_summary
         )
         
     except HTTPException:
@@ -232,12 +432,19 @@ async def get_doctor_dashboard(
         # Return empty dashboard on error to prevent frontend crashes
         return DoctorDashboardResponse(
             stats=DoctorDashboardStats(
-                today_appointments_count=0,
-                queue_patients_count=0,
-                pending_records_count=0,
-                monthly_revenue=0.0
+                appointments=PeriodStats(day=0, week=0, month=0),
+                queue_patients=PeriodStats(day=0, week=0, month=0),
+                pending_records=PeriodStats(day=0, week=0, month=0),
+                revenue_day=0.0,
+                revenue_week=0.0,
+                revenue_month=0.0
             ),
-            upcoming_appointments=[]
+            upcoming_appointments=[],
+            weekly_summary=WeeklySummary(
+                procedures_count=0,
+                new_consultations_count=0,
+                returns_count=0
+            )
         )
 
 

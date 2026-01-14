@@ -8,10 +8,11 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, func
 
 from app.core.auth import get_current_user, RoleChecker
 from app.models import User, Appointment, Patient, UserRole, AppointmentStatus
+from app.models.return_approval import ReturnApprovalRequest, ReturnApprovalStatus
 from app.schemas.appointment import (
     AppointmentCreate,
     AppointmentUpdate,
@@ -19,7 +20,12 @@ from app.schemas.appointment import (
     AppointmentListResponse,
     AppointmentStatusUpdate,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from app.schemas.return_approval import (
+    ReturnApprovalRequestCreate,
+    ReturnApprovalRequestUpdate,
+    ReturnApprovalRequestResponse,
+)
 from database import get_async_session
 from app.services.realtime import appointment_realtime_manager
 
@@ -559,7 +565,6 @@ async def book_patient_appointment(
                             <div class="info-item">
                                 <span class="info-label">Médico:</span> {doctor.full_name}
                             </div>
-                            {f'<div class="info-item"><span class="info-label">Motivo:</span> {db_appointment.reason}</div>' if db_appointment.reason else ''}
                         </div>
                         
                         <p style="text-align: center;">
@@ -588,7 +593,6 @@ async def book_patient_appointment(
                 f"Data: {appointment_date}\n"
                 f"Horário: {appointment_time}\n"
                 f"Médico: {doctor.full_name}\n"
-                f"{f'Motivo: {db_appointment.reason}\n' if db_appointment.reason else ''}"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"Lembrete: Por favor, chegue com 15 minutos de antecedência.\n\n"
                 f"Ver detalhes: {appointment_url}\n\n"
@@ -917,6 +921,63 @@ async def create_appointment(
             detail="This time slot is not available for the selected doctor"
         )
     
+    # Check return appointment limit (30% of daily appointments)
+    appointment_datetime = appointment_in.scheduled_datetime
+    if isinstance(appointment_datetime, str):
+        appointment_datetime = datetime.datetime.fromisoformat(appointment_datetime.replace('Z', '+00:00'))
+    
+    # Check if this is a return appointment
+    is_return = appointment_in.appointment_type and appointment_in.appointment_type.lower() in ['follow-up', 'return', 'retorno']
+    
+    if is_return:
+        # Get the date (without time)
+        if hasattr(appointment_datetime, 'date'):
+            appointment_date = appointment_datetime.date()
+        else:
+            appointment_date = appointment_datetime
+        
+        # Get start and end of the day in UTC
+        from datetime import timezone
+        day_start = datetime.datetime.combine(appointment_date, datetime.time.min).replace(tzinfo=timezone.utc)
+        day_end = datetime.datetime.combine(appointment_date, datetime.time.max).replace(tzinfo=timezone.utc)
+        
+        # Count total appointments for the day
+        total_appointments_query = select(func.count(Appointment.id)).filter(
+            and_(
+                Appointment.doctor_id == appointment_in.doctor_id,
+                Appointment.clinic_id == current_user.clinic_id,
+                Appointment.scheduled_datetime >= day_start,
+                Appointment.scheduled_datetime <= day_end,
+                Appointment.status != AppointmentStatus.CANCELLED
+            )
+        )
+        total_appointments_result = await db.execute(total_appointments_query)
+        total_appointments = total_appointments_result.scalar() or 0
+        
+        # Count return appointments for the day
+        returns_query = select(func.count(Appointment.id)).filter(
+            and_(
+                Appointment.doctor_id == appointment_in.doctor_id,
+                Appointment.clinic_id == current_user.clinic_id,
+                Appointment.scheduled_datetime >= day_start,
+                Appointment.scheduled_datetime <= day_end,
+                Appointment.appointment_type.in_(['follow-up', 'return', 'retorno']),
+                Appointment.status != AppointmentStatus.CANCELLED
+            )
+        )
+        returns_result = await db.execute(returns_query)
+        returns_count = returns_result.scalar() or 0
+        
+        # Calculate 30% limit (minimum 1 slot if there are any appointments)
+        max_returns = max(1, int(total_appointments * 0.3)) if total_appointments > 0 else 0
+        
+        # Check if limit is exceeded
+        if returns_count >= max_returns:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Limite de retornos atingido para este dia. Máximo permitido: {max_returns} (30% dos {total_appointments} agendamentos do dia). Já agendados: {returns_count}."
+            )
+    
     # Create appointment
     appointment_data = appointment_in.model_dump()
     # Remove payment-related fields that don't belong in Appointment model
@@ -1063,7 +1124,6 @@ async def create_appointment(
                             <div class="info-item">
                                 <span class="info-label">Médico:</span> {doctor.full_name}
                             </div>
-                            {f'<div class="info-item"><span class="info-label">Motivo:</span> {db_appointment.reason}</div>' if db_appointment.reason else ''}
                         </div>
                         
                         <p style="text-align: center;">
@@ -1092,7 +1152,6 @@ async def create_appointment(
                 f"Data: {appointment_date}\n"
                 f"Horário: {appointment_time}\n"
                 f"Médico: {doctor.full_name}\n"
-                f"{f'Motivo: {db_appointment.reason}\n' if db_appointment.reason else ''}"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"Lembrete: Por favor, chegue com 15 minutos de antecedência.\n\n"
                 f"Ver detalhes: {appointment_url}\n\n"
@@ -1704,4 +1763,459 @@ async def get_available_slots(
         )
     
     return time_slots
+
+
+# ==================== Patient History for Appointment Creation ====================
+
+class PatientAppointmentHistoryResponse(BaseModel):
+    """Patient appointment history for appointment creation suggestions"""
+    last_appointment_date: Optional[datetime.datetime] = None
+    last_appointment_type: Optional[str] = None
+    returns_count_this_month: int = 0
+    returns_count_total: int = 0
+    last_consultation_date: Optional[datetime.datetime] = None
+    suggested_date: Optional[datetime.date] = None
+    message: Optional[str] = None
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
+
+
+@router.get("/patient/{patient_id}/history", response_model=PatientAppointmentHistoryResponse)
+async def get_patient_appointment_history(
+    patient_id: int,
+    doctor_id: Optional[int] = Query(None, description="Filter by doctor ID (optional)"),
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get patient appointment history for appointment creation suggestions
+    
+    Returns:
+    - Last appointment date and type
+    - Count of returns this month and total
+    - Last consultation date
+    - Suggested date based on return count
+    - Message with notification for secretary
+    """
+    # Verify patient exists and belongs to current clinic
+    patient_query = select(Patient).filter(
+        and_(
+            Patient.id == patient_id,
+            Patient.clinic_id == current_user.clinic_id
+        )
+    )
+    patient_result = await db.execute(patient_query)
+    patient = patient_result.scalar_one_or_none()
+    
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Patient not found"
+        )
+    
+    # Get all appointments for this patient
+    appointments_query = select(Appointment).filter(
+        and_(
+            Appointment.patient_id == patient_id,
+            Appointment.clinic_id == current_user.clinic_id,
+            Appointment.status != AppointmentStatus.CANCELLED
+        )
+    )
+    
+    # Filter by doctor if provided
+    if doctor_id:
+        appointments_query = appointments_query.filter(Appointment.doctor_id == doctor_id)
+    
+    appointments_query = appointments_query.order_by(Appointment.scheduled_datetime.desc())
+    
+    appointments_result = await db.execute(appointments_query)
+    appointments = appointments_result.scalars().all()
+    
+    if not appointments:
+        return PatientAppointmentHistoryResponse(
+            last_appointment_date=None,
+            last_appointment_type=None,
+            returns_count_this_month=0,
+            returns_count_total=0,
+            last_consultation_date=None,
+            suggested_date=None,
+            message="Paciente sem histórico de consultas anteriores."
+        )
+    
+    # Get current month start and end
+    now = datetime.datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    # Get last appointment
+    last_appointment = appointments[0]
+    last_appointment_date = last_appointment.scheduled_datetime
+    last_appointment_type = last_appointment.appointment_type
+    
+    # Count returns this month
+    returns_this_month = [
+        apt for apt in appointments
+        if apt.scheduled_datetime >= month_start
+        and apt.appointment_type
+        and apt.appointment_type.lower() in ['follow-up', 'return', 'retorno']
+    ]
+    returns_count_this_month = len(returns_this_month)
+    
+    # Count total returns
+    returns_total = [
+        apt for apt in appointments
+        if apt.appointment_type
+        and apt.appointment_type.lower() in ['follow-up', 'return', 'retorno']
+    ]
+    returns_count_total = len(returns_total)
+    
+    # Get last consultation (non-return)
+    last_consultation = None
+    for apt in appointments:
+        if apt.appointment_type and apt.appointment_type.lower() not in ['follow-up', 'return', 'retorno']:
+            last_consultation = apt
+            break
+    
+    last_consultation_date = last_consultation.scheduled_datetime if last_consultation else None
+    
+    # Calculate suggested date
+    suggested_date = None
+    message = None
+    
+    if last_appointment_date:
+        # If more than one return, suggest next month
+        if returns_count_this_month > 1:
+            # Suggest next month
+            if now.month == 12:
+                suggested_date = datetime.date(now.year + 1, 1, 1)
+            else:
+                suggested_date = datetime.date(now.year, now.month + 1, 1)
+            message = f"⚠️ Atenção: Paciente já possui {returns_count_this_month} retornos agendados este mês. Recomendado agendar para o próximo mês."
+        else:
+            # Suggest based on last appointment date (30 days later)
+            last_date = last_appointment_date.date() if hasattr(last_appointment_date, 'date') else last_appointment_date
+            suggested_date = last_date + datetime.timedelta(days=30)
+            if suggested_date < now.date():
+                suggested_date = now.date() + datetime.timedelta(days=7)  # At least 7 days from now
+            message = f"📅 Última consulta: {last_date.strftime('%d/%m/%Y')}. Sugestão de data: {suggested_date.strftime('%d/%m/%Y')}"
+    
+    return PatientAppointmentHistoryResponse(
+        last_appointment_date=last_appointment_date,
+        last_appointment_type=last_appointment_type,
+        returns_count_this_month=returns_count_this_month,
+        returns_count_total=returns_count_total,
+        last_consultation_date=last_consultation_date,
+        suggested_date=suggested_date,
+        message=message
+    )
+
+
+# ==================== Doctor Procedures ====================
+
+@router.get("/doctor/{doctor_id}/procedures")
+async def get_doctor_procedures(
+    doctor_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get procedures available for a specific doctor
+    Returns ServiceItems from the clinic that are procedures
+    """
+    # Verify doctor exists and belongs to current clinic
+    doctor_query = select(User).filter(
+        and_(
+            User.id == doctor_id,
+            User.clinic_id == current_user.clinic_id,
+            User.role == UserRole.DOCTOR
+        )
+    )
+    doctor_result = await db.execute(doctor_query)
+    doctor = doctor_result.scalar_one_or_none()
+    
+    if not doctor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Doctor not found"
+        )
+    
+    # Get ServiceItems that are procedures for this clinic
+    from app.models.financial import ServiceItem, ServiceCategory
+    procedures_query = select(ServiceItem).filter(
+        and_(
+            ServiceItem.clinic_id == current_user.clinic_id,
+            ServiceItem.is_active == True,
+            ServiceItem.category == ServiceCategory.PROCEDURE
+        )
+    ).order_by(ServiceItem.name)
+    
+    procedures_result = await db.execute(procedures_query)
+    procedures = procedures_result.scalars().all()
+    
+    # Also get general Procedure model items
+    from app.models.procedure import Procedure
+    procedure_query = select(Procedure).filter(
+        and_(
+            Procedure.clinic_id == current_user.clinic_id,
+            Procedure.is_active == True
+        )
+    ).order_by(Procedure.name)
+    
+    procedure_result = await db.execute(procedure_query)
+    procedure_items = procedure_result.scalars().all()
+    
+    # Combine both into a unified response
+    result = []
+    
+    # Add ServiceItems
+    for item in procedures:
+        result.append({
+            "id": item.id,
+            "name": item.name,
+            "description": item.description,
+            "code": item.code,
+            "price": float(item.price),
+            "category": item.category.value,
+            "type": "service_item"
+        })
+    
+    # Add Procedures
+    for proc in procedure_items:
+        result.append({
+            "id": proc.id,
+            "name": proc.name,
+            "description": proc.description,
+            "code": None,
+            "price": float(proc.cost),
+            "category": "procedure",
+            "type": "procedure"
+        })
+    
+    return result
+
+
+# ==================== Return Approval Requests ====================
+
+@router.post("/return-approval-requests", response_model=ReturnApprovalRequestResponse, status_code=status.HTTP_201_CREATED)
+async def create_return_approval_request(
+    request_data: ReturnApprovalRequestCreate,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a return approval request (secretary requests approval for multiple returns)
+    """
+    # Only secretaries and admins can create approval requests
+    if current_user.role not in [UserRole.SECRETARY, UserRole.ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only secretaries and admins can create approval requests"
+        )
+    
+    # Verify patient exists
+    patient_query = select(Patient).filter(
+        and_(
+            Patient.id == request_data.patient_id,
+            Patient.clinic_id == current_user.clinic_id
+        )
+    )
+    patient_result = await db.execute(patient_query)
+    patient = patient_result.scalar_one_or_none()
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Patient not found"
+        )
+    
+    # Verify doctor exists
+    doctor_query = select(User).filter(
+        and_(
+            User.id == request_data.doctor_id,
+            User.clinic_id == current_user.clinic_id,
+            User.role == UserRole.DOCTOR
+        )
+    )
+    doctor_result = await db.execute(doctor_query)
+    doctor = doctor_result.scalar_one_or_none()
+    if not doctor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Doctor not found"
+        )
+    
+    # Set expiration date (7 days from now)
+    from datetime import timezone, timedelta
+    expires_at = datetime.datetime.now(timezone.utc) + timedelta(days=7)
+    
+    # Create approval request
+    approval_request = ReturnApprovalRequest(
+        patient_id=request_data.patient_id,
+        doctor_id=request_data.doctor_id,
+        clinic_id=current_user.clinic_id,
+        requested_appointment_date=request_data.requested_appointment_date,
+        appointment_type=request_data.appointment_type,
+        notes=request_data.notes,
+        returns_count_this_month=request_data.returns_count_this_month,
+        status=ReturnApprovalStatus.PENDING,
+        requested_by=current_user.id,
+        expires_at=expires_at
+    )
+    
+    db.add(approval_request)
+    await db.commit()
+    await db.refresh(approval_request)
+    
+    # Build response with names from already loaded objects
+    response = ReturnApprovalRequestResponse.model_validate(approval_request)
+    response.patient_name = f"{patient.first_name} {patient.last_name}"
+    response.doctor_name = f"{doctor.first_name} {doctor.last_name}"
+    response.requester_name = f"{current_user.first_name} {current_user.last_name}"
+    
+    return response
+
+
+@router.get("/return-approval-requests", response_model=List[ReturnApprovalRequestResponse])
+async def get_return_approval_requests(
+    status_filter: Optional[str] = Query(None, description="Filter by status: pending, approved, rejected, expired"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get return approval requests
+    - Doctors see requests for their appointments
+    - Secretaries/Admins see all requests
+    """
+    query = select(ReturnApprovalRequest).filter(
+        ReturnApprovalRequest.clinic_id == current_user.clinic_id
+    )
+    
+    # Doctors only see their own requests
+    if current_user.role == UserRole.DOCTOR:
+        query = query.filter(ReturnApprovalRequest.doctor_id == current_user.id)
+    
+    # Filter by status
+    if status_filter:
+        query = query.filter(ReturnApprovalRequest.status == ReturnApprovalStatus(status_filter))
+    
+    query = query.order_by(ReturnApprovalRequest.requested_at.desc())
+    
+    # Load relationships using joinedload for better performance
+    from sqlalchemy.orm import joinedload
+    query = query.options(
+        joinedload(ReturnApprovalRequest.patient),
+        joinedload(ReturnApprovalRequest.doctor),
+        joinedload(ReturnApprovalRequest.requester),
+        joinedload(ReturnApprovalRequest.approver)
+    )
+    
+    result = await db.execute(query)
+    requests = result.unique().scalars().all()
+    
+    responses = []
+    for req in requests:
+        response = ReturnApprovalRequestResponse.model_validate(req)
+        if req.patient:
+            response.patient_name = f"{req.patient.first_name} {req.patient.last_name}"
+        if req.doctor:
+            response.doctor_name = f"{req.doctor.first_name} {req.doctor.last_name}"
+        if req.requester:
+            response.requester_name = f"{req.requester.first_name} {req.requester.last_name}"
+        if req.approver:
+            response.approver_name = f"{req.approver.first_name} {req.approver.last_name}"
+        responses.append(response)
+    
+    return responses
+
+
+@router.patch("/return-approval-requests/{request_id}", response_model=ReturnApprovalRequestResponse)
+async def update_return_approval_request(
+    request_id: int,
+    update_data: ReturnApprovalRequestUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Approve or reject a return approval request (doctors only)
+    """
+    # Only doctors can approve/reject
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only doctors can approve or reject return approval requests"
+        )
+    
+    # Get the request
+    request_query = select(ReturnApprovalRequest).filter(
+        and_(
+            ReturnApprovalRequest.id == request_id,
+            ReturnApprovalRequest.clinic_id == current_user.clinic_id,
+            ReturnApprovalRequest.doctor_id == current_user.id
+        )
+    )
+    request_result = await db.execute(request_query)
+    approval_request = request_result.scalar_one_or_none()
+    
+    if not approval_request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Approval request not found"
+        )
+    
+    if approval_request.status != ReturnApprovalStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Request is already {approval_request.status.value}"
+        )
+    
+    # Check if expired
+    from datetime import timezone
+    if approval_request.expires_at and approval_request.expires_at < datetime.datetime.now(timezone.utc):
+        approval_request.status = ReturnApprovalStatus.EXPIRED
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This approval request has expired"
+        )
+    
+    # Update status
+    new_status = ReturnApprovalStatus(update_data.status)
+    approval_request.status = new_status
+    approval_request.approved_by = current_user.id
+    approval_request.approval_notes = update_data.approval_notes
+    approval_request.reviewed_at = datetime.datetime.now(timezone.utc)
+    
+    # If approved, create the appointment
+    if new_status == ReturnApprovalStatus.APPROVED:
+        appointment = Appointment(
+            patient_id=approval_request.patient_id,
+            doctor_id=approval_request.doctor_id,
+            clinic_id=approval_request.clinic_id,
+            scheduled_datetime=approval_request.requested_appointment_date,
+            appointment_type=approval_request.appointment_type,
+            notes=approval_request.notes,
+            status=AppointmentStatus.SCHEDULED
+        )
+        db.add(appointment)
+        await db.flush()
+        approval_request.resulting_appointment_id = appointment.id
+    
+    await db.commit()
+    await db.refresh(approval_request)
+    
+    # Load relationships
+    await db.refresh(approval_request, ["patient", "doctor", "requester", "approver"])
+    
+    response = ReturnApprovalRequestResponse.model_validate(approval_request)
+    if approval_request.patient:
+        response.patient_name = f"{approval_request.patient.first_name} {approval_request.patient.last_name}"
+    if approval_request.doctor:
+        response.doctor_name = f"{approval_request.doctor.first_name} {approval_request.doctor.last_name}"
+    if approval_request.requester:
+        response.requester_name = f"{approval_request.requester.first_name} {approval_request.requester.last_name}"
+    if approval_request.approver:
+        response.approver_name = f"{approval_request.approver.first_name} {approval_request.approver.last_name}"
+    
+    return response
 

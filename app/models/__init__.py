@@ -97,6 +97,7 @@ class Clinic(BaseModel):
     procedures = relationship("Procedure", back_populates="clinic", cascade="all, delete-orphan")
     insurance_plans = relationship("InsurancePlan", back_populates="clinic", cascade="all, delete-orphan")
     preauth_requests = relationship("PreAuthRequest", back_populates="clinic", cascade="all, delete-orphan")
+    return_approval_requests = relationship("ReturnApprovalRequest", back_populates="clinic", cascade="all, delete-orphan")
     
     # New licensing relationships
     license = relationship(
@@ -146,6 +147,9 @@ class User(BaseModel):
         foreign_keys="Appointment.doctor_id",
         back_populates="doctor"
     )
+    return_approval_requests_as_doctor = relationship("ReturnApprovalRequest", foreign_keys="ReturnApprovalRequest.doctor_id", back_populates="doctor")
+    return_approval_requests_created = relationship("ReturnApprovalRequest", foreign_keys="ReturnApprovalRequest.requested_by", back_populates="requester")
+    return_approval_requests_approved = relationship("ReturnApprovalRequest", foreign_keys="ReturnApprovalRequest.approved_by", back_populates="approver")
     created_payments = relationship("Payment", back_populates="creator")
     created_preauth_requests = relationship("PreAuthRequest", back_populates="creator")
     voice_sessions = relationship("VoiceSession", back_populates="user", cascade="all, delete-orphan")
@@ -210,6 +214,7 @@ class Patient(BaseModel):
     preauth_requests = relationship("PreAuthRequest", back_populates="patient", cascade="all, delete-orphan")
     message_threads = relationship("MessageThread", back_populates="patient", cascade="all, delete-orphan")
     telemetry_records = relationship("PatientTelemetry", back_populates="patient", cascade="all, delete-orphan")
+    return_approval_requests = relationship("ReturnApprovalRequest", back_populates="patient", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Patient(id={self.id}, name='{self.full_name}')>"
@@ -272,6 +277,7 @@ class Appointment(BaseModel):
     doctor = relationship("User", foreign_keys=[doctor_id], back_populates="appointments_as_doctor")
     clinic = relationship("Clinic", back_populates="appointments")
     clinical_record = relationship("ClinicalRecord", back_populates="appointment", uselist=False, cascade="all, delete-orphan")
+    return_approval_request = relationship("ReturnApprovalRequest", foreign_keys="ReturnApprovalRequest.resulting_appointment_id", back_populates="resulting_appointment", uselist=False)
     invoice = relationship("Invoice", back_populates="appointment", uselist=False, cascade="all, delete-orphan")
     budgets = relationship("Budget", back_populates="appointment", cascade="all, delete-orphan")
     voice_sessions = relationship("VoiceSession", back_populates="appointment", cascade="all, delete-orphan")
@@ -308,6 +314,9 @@ from app.models.procedure import Procedure, ProcedureProduct
 from app.models.license import License, LicenseStatus, LicensePlan
 from app.models.activation import Activation, ActivationStatus
 from app.models.entitlement import Entitlement, ModuleName, LimitType
+
+# Import return approval models
+from app.models.return_approval import ReturnApprovalRequest, ReturnApprovalStatus
 
 # Import ICD-10 models
 from app.models.icd10 import ICD10Chapter, ICD10Group, ICD10Category, ICD10Subcategory, ICD10SearchIndex
