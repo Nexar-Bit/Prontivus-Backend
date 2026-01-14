@@ -50,6 +50,8 @@ class ReturnApprovalRequest(Base):
     requested_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)  # Auto-expire after 7 days
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
     
     # Relationships
     patient = relationship("Patient", back_populates="return_approval_requests")

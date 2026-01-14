@@ -762,6 +762,334 @@ async def get_today_patients(
     return out
 
 
+# ==================== Return Approval Requests ====================
+
+@router.post("/return-approval-requests", response_model=ReturnApprovalRequestResponse, status_code=status.HTTP_201_CREATED)
+async def create_return_approval_request(
+    request_data: ReturnApprovalRequestCreate,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a return approval request (secretary requests approval for multiple returns)
+    """
+    # Only secretaries and admins can create approval requests
+    if current_user.role not in [UserRole.SECRETARY, UserRole.ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only secretaries and admins can create approval requests"
+        )
+    
+    # Verify patient exists
+    patient_query = select(Patient).filter(
+        and_(
+            Patient.id == request_data.patient_id,
+            Patient.clinic_id == current_user.clinic_id
+        )
+    )
+    patient_result = await db.execute(patient_query)
+    patient = patient_result.scalar_one_or_none()
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Patient not found"
+        )
+    
+    # Verify doctor exists
+    doctor_query = select(User).filter(
+        and_(
+            User.id == request_data.doctor_id,
+            User.clinic_id == current_user.clinic_id,
+            User.role == UserRole.DOCTOR
+        )
+    )
+    doctor_result = await db.execute(doctor_query)
+    doctor = doctor_result.scalar_one_or_none()
+    if not doctor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Doctor not found"
+        )
+    
+    # Set expiration date (7 days from now)
+    from datetime import timezone, timedelta
+    expires_at = datetime.datetime.now(timezone.utc) + timedelta(days=7)
+    
+    # Create approval request
+    approval_request = ReturnApprovalRequest(
+        patient_id=request_data.patient_id,
+        doctor_id=request_data.doctor_id,
+        clinic_id=current_user.clinic_id,
+        requested_appointment_date=request_data.requested_appointment_date,
+        appointment_type=request_data.appointment_type,
+        notes=request_data.notes,
+        returns_count_this_month=request_data.returns_count_this_month,
+        status=ReturnApprovalStatus.PENDING,
+        requested_by=current_user.id,
+        expires_at=expires_at
+    )
+    
+    db.add(approval_request)
+    await db.commit()
+    await db.refresh(approval_request)
+    
+    # Load relationships for response
+    await db.refresh(approval_request, ["patient", "doctor", "requester", "approver"])
+    
+    # Build response manually to ensure proper enum conversion
+    response = ReturnApprovalRequestResponse(
+        id=approval_request.id,
+        patient_id=approval_request.patient_id,
+        doctor_id=approval_request.doctor_id,
+        clinic_id=approval_request.clinic_id,
+        requested_appointment_date=approval_request.requested_appointment_date,
+        appointment_type=approval_request.appointment_type,
+        notes=approval_request.notes,
+        returns_count_this_month=approval_request.returns_count_this_month,
+        status=approval_request.status.value if approval_request.status else "pending",
+        requested_by=approval_request.requested_by,
+        approved_by=approval_request.approved_by,
+        approval_notes=approval_request.approval_notes,
+        resulting_appointment_id=approval_request.resulting_appointment_id,
+        requested_at=approval_request.requested_at,
+        reviewed_at=approval_request.reviewed_at,
+        expires_at=approval_request.expires_at,
+        created_at=getattr(approval_request, 'created_at', approval_request.requested_at),
+        updated_at=getattr(approval_request, 'updated_at', None),
+        patient_name=f"{patient.first_name} {patient.last_name}",
+        doctor_name=f"{doctor.first_name} {doctor.last_name}",
+        requester_name=f"{current_user.first_name} {current_user.last_name}",
+        approver_name=None,
+    )
+    
+    return response
+
+
+@router.get("/return-approval-requests", response_model=List[ReturnApprovalRequestResponse])
+async def get_return_approval_requests(
+    status_filter: Optional[str] = Query(None, description="Filter by status: pending, approved, rejected, expired"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get return approval requests
+    - Doctors see requests for their appointments
+    - Secretaries/Admins see all requests
+    """
+    try:
+        query = select(ReturnApprovalRequest).filter(
+            ReturnApprovalRequest.clinic_id == current_user.clinic_id
+        )
+        
+        # Doctors only see their own requests
+        if current_user.role == UserRole.DOCTOR:
+            query = query.filter(ReturnApprovalRequest.doctor_id == current_user.id)
+        
+        # Filter by status (convert to lowercase to match enum)
+        if status_filter:
+            try:
+                status_lower = status_filter.lower().strip()
+                # Map lowercase string to enum value (not enum name)
+                # SQLAlchemy needs the enum value string, not the enum constant
+                status_map = {
+                    'pending': ReturnApprovalStatus.PENDING.value,  # Use .value to get "pending"
+                    'approved': ReturnApprovalStatus.APPROVED.value,  # Use .value to get "approved"
+                    'rejected': ReturnApprovalStatus.REJECTED.value,  # Use .value to get "rejected"
+                    'expired': ReturnApprovalStatus.EXPIRED.value,  # Use .value to get "expired"
+                }
+                if status_lower in status_map:
+                    # Cast the column to string and compare with the enum value
+                    from sqlalchemy import cast, String
+                    query = query.filter(
+                        cast(ReturnApprovalRequest.status, String) == status_map[status_lower]
+                    )
+                else:
+                    logger.warning(f"Invalid status filter: {status_filter}, ignoring")
+            except Exception as e:
+                # Invalid status filter, ignore it
+                logger.warning(f"Error processing status filter {status_filter}: {str(e)}, ignoring")
+                pass
+        
+        query = query.order_by(ReturnApprovalRequest.requested_at.desc())
+        
+        # Load relationships using joinedload for better performance
+        from sqlalchemy.orm import joinedload
+        query = query.options(
+            joinedload(ReturnApprovalRequest.patient),
+            joinedload(ReturnApprovalRequest.doctor),
+            joinedload(ReturnApprovalRequest.requester),
+            joinedload(ReturnApprovalRequest.approver)
+        )
+        
+        result = await db.execute(query)
+        requests = result.unique().scalars().all()
+        
+        responses = []
+        for req in requests:
+            try:
+                # Get created_at and updated_at safely
+                created_at = getattr(req, 'created_at', None) or req.requested_at
+                updated_at = getattr(req, 'updated_at', None)
+                
+                # Get status value safely
+                status_value = req.status.value if hasattr(req.status, 'value') else str(req.status) if req.status else "pending"
+                
+                # Manually construct response to ensure proper enum conversion
+                response = ReturnApprovalRequestResponse(
+                    id=req.id,
+                    patient_id=req.patient_id,
+                    doctor_id=req.doctor_id,
+                    clinic_id=req.clinic_id,
+                    requested_appointment_date=req.requested_appointment_date,
+                    appointment_type=req.appointment_type or "retorno",
+                    notes=req.notes,
+                    returns_count_this_month=req.returns_count_this_month or 0,
+                    status=status_value,
+                    requested_by=req.requested_by,
+                    approved_by=req.approved_by,
+                    approval_notes=req.approval_notes,
+                    resulting_appointment_id=req.resulting_appointment_id,
+                    requested_at=req.requested_at,
+                    reviewed_at=req.reviewed_at,
+                    expires_at=req.expires_at,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    patient_name=f"{req.patient.first_name} {req.patient.last_name}" if req.patient and req.patient.first_name else None,
+                    doctor_name=f"{req.doctor.first_name} {req.doctor.last_name}" if req.doctor and req.doctor.first_name else None,
+                    requester_name=f"{req.requester.first_name} {req.requester.last_name}" if req.requester and req.requester.first_name else None,
+                    approver_name=f"{req.approver.first_name} {req.approver.last_name}" if req.approver and req.approver.first_name else None,
+                )
+                responses.append(response)
+            except Exception as e:
+                logger.error(f"Error processing return approval request {req.id}: {str(e)}")
+                # Skip this request if there's an error processing it
+                continue
+        
+        return responses
+    except Exception as e:
+        logger.error(f"Error getting return approval requests: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading return approval requests: {str(e)}"
+        )
+
+
+@router.patch("/return-approval-requests/{request_id}", response_model=ReturnApprovalRequestResponse)
+async def update_return_approval_request(
+    request_id: int,
+    update_data: ReturnApprovalRequestUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Approve or reject a return approval request (doctors only)
+    """
+    # Only doctors can approve/reject
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only doctors can approve or reject return approval requests"
+        )
+    
+    # Get the request
+    request_query = select(ReturnApprovalRequest).filter(
+        and_(
+            ReturnApprovalRequest.id == request_id,
+            ReturnApprovalRequest.clinic_id == current_user.clinic_id,
+            ReturnApprovalRequest.doctor_id == current_user.id
+        )
+    )
+    request_result = await db.execute(request_query)
+    approval_request = request_result.scalar_one_or_none()
+    
+    if not approval_request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Approval request not found"
+        )
+    
+    if approval_request.status != ReturnApprovalStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Request is already {approval_request.status.value}"
+        )
+    
+    # Check if expired
+    from datetime import timezone
+    if approval_request.expires_at and approval_request.expires_at < datetime.datetime.now(timezone.utc):
+        approval_request.status = ReturnApprovalStatus.EXPIRED
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This approval request has expired"
+        )
+    
+    # Update status (convert to lowercase to match enum)
+    status_lower = update_data.status.lower() if update_data.status else None
+    if not status_lower:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Status is required"
+        )
+    new_status = ReturnApprovalStatus(status_lower)
+    approval_request.status = new_status
+    approval_request.approved_by = current_user.id
+    approval_request.approval_notes = update_data.approval_notes
+    approval_request.reviewed_at = datetime.datetime.now(timezone.utc)
+    
+    # If approved, create the appointment
+    if new_status == ReturnApprovalStatus.APPROVED:
+        appointment = Appointment(
+            patient_id=approval_request.patient_id,
+            doctor_id=approval_request.doctor_id,
+            clinic_id=approval_request.clinic_id,
+            scheduled_datetime=approval_request.requested_appointment_date,
+            appointment_type=approval_request.appointment_type,
+            notes=approval_request.notes,
+            status=AppointmentStatus.SCHEDULED
+        )
+        db.add(appointment)
+        await db.flush()
+        approval_request.resulting_appointment_id = appointment.id
+    
+    # Update updated_at timestamp
+    approval_request.updated_at = datetime.datetime.now(timezone.utc)
+    
+    await db.commit()
+    await db.refresh(approval_request)
+    
+    # Load relationships
+    await db.refresh(approval_request, ["patient", "doctor", "requester", "approver"])
+    
+    # Build response manually to ensure proper enum conversion
+    response = ReturnApprovalRequestResponse(
+        id=approval_request.id,
+        patient_id=approval_request.patient_id,
+        doctor_id=approval_request.doctor_id,
+        clinic_id=approval_request.clinic_id,
+        requested_appointment_date=approval_request.requested_appointment_date,
+        appointment_type=approval_request.appointment_type,
+        notes=approval_request.notes,
+        returns_count_this_month=approval_request.returns_count_this_month,
+        status=approval_request.status.value if approval_request.status else "pending",
+        requested_by=approval_request.requested_by,
+        approved_by=approval_request.approved_by,
+        approval_notes=approval_request.approval_notes,
+        resulting_appointment_id=approval_request.resulting_appointment_id,
+        requested_at=approval_request.requested_at,
+        reviewed_at=approval_request.reviewed_at,
+        expires_at=approval_request.expires_at,
+        created_at=getattr(approval_request, 'created_at', approval_request.requested_at),
+        updated_at=getattr(approval_request, 'updated_at', None),
+        patient_name=f"{approval_request.patient.first_name} {approval_request.patient.last_name}" if approval_request.patient else None,
+        doctor_name=f"{approval_request.doctor.first_name} {approval_request.doctor.last_name}" if approval_request.doctor else None,
+        requester_name=f"{approval_request.requester.first_name} {approval_request.requester.last_name}" if approval_request.requester else None,
+        approver_name=f"{approval_request.approver.first_name} {approval_request.approver.last_name}" if approval_request.approver else None,
+    )
+    
+    return response
+
+
 @router.post("/{appointment_id}/reschedule", response_model=AppointmentResponse)
 async def reschedule_patient_appointment(
     appointment_id: int,
@@ -1994,228 +2322,4 @@ async def get_doctor_procedures(
         })
     
     return result
-
-
-# ==================== Return Approval Requests ====================
-
-@router.post("/return-approval-requests", response_model=ReturnApprovalRequestResponse, status_code=status.HTTP_201_CREATED)
-async def create_return_approval_request(
-    request_data: ReturnApprovalRequestCreate,
-    current_user: User = Depends(require_staff),
-    db: AsyncSession = Depends(get_async_session),
-):
-    """
-    Create a return approval request (secretary requests approval for multiple returns)
-    """
-    # Only secretaries and admins can create approval requests
-    if current_user.role not in [UserRole.SECRETARY, UserRole.ADMIN]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only secretaries and admins can create approval requests"
-        )
-    
-    # Verify patient exists
-    patient_query = select(Patient).filter(
-        and_(
-            Patient.id == request_data.patient_id,
-            Patient.clinic_id == current_user.clinic_id
-        )
-    )
-    patient_result = await db.execute(patient_query)
-    patient = patient_result.scalar_one_or_none()
-    if not patient:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Patient not found"
-        )
-    
-    # Verify doctor exists
-    doctor_query = select(User).filter(
-        and_(
-            User.id == request_data.doctor_id,
-            User.clinic_id == current_user.clinic_id,
-            User.role == UserRole.DOCTOR
-        )
-    )
-    doctor_result = await db.execute(doctor_query)
-    doctor = doctor_result.scalar_one_or_none()
-    if not doctor:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Doctor not found"
-        )
-    
-    # Set expiration date (7 days from now)
-    from datetime import timezone, timedelta
-    expires_at = datetime.datetime.now(timezone.utc) + timedelta(days=7)
-    
-    # Create approval request
-    approval_request = ReturnApprovalRequest(
-        patient_id=request_data.patient_id,
-        doctor_id=request_data.doctor_id,
-        clinic_id=current_user.clinic_id,
-        requested_appointment_date=request_data.requested_appointment_date,
-        appointment_type=request_data.appointment_type,
-        notes=request_data.notes,
-        returns_count_this_month=request_data.returns_count_this_month,
-        status=ReturnApprovalStatus.PENDING,
-        requested_by=current_user.id,
-        expires_at=expires_at
-    )
-    
-    db.add(approval_request)
-    await db.commit()
-    await db.refresh(approval_request)
-    
-    # Build response with names from already loaded objects
-    response = ReturnApprovalRequestResponse.model_validate(approval_request)
-    response.patient_name = f"{patient.first_name} {patient.last_name}"
-    response.doctor_name = f"{doctor.first_name} {doctor.last_name}"
-    response.requester_name = f"{current_user.first_name} {current_user.last_name}"
-    
-    return response
-
-
-@router.get("/return-approval-requests", response_model=List[ReturnApprovalRequestResponse])
-async def get_return_approval_requests(
-    status_filter: Optional[str] = Query(None, description="Filter by status: pending, approved, rejected, expired"),
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_session),
-):
-    """
-    Get return approval requests
-    - Doctors see requests for their appointments
-    - Secretaries/Admins see all requests
-    """
-    query = select(ReturnApprovalRequest).filter(
-        ReturnApprovalRequest.clinic_id == current_user.clinic_id
-    )
-    
-    # Doctors only see their own requests
-    if current_user.role == UserRole.DOCTOR:
-        query = query.filter(ReturnApprovalRequest.doctor_id == current_user.id)
-    
-    # Filter by status
-    if status_filter:
-        query = query.filter(ReturnApprovalRequest.status == ReturnApprovalStatus(status_filter))
-    
-    query = query.order_by(ReturnApprovalRequest.requested_at.desc())
-    
-    # Load relationships using joinedload for better performance
-    from sqlalchemy.orm import joinedload
-    query = query.options(
-        joinedload(ReturnApprovalRequest.patient),
-        joinedload(ReturnApprovalRequest.doctor),
-        joinedload(ReturnApprovalRequest.requester),
-        joinedload(ReturnApprovalRequest.approver)
-    )
-    
-    result = await db.execute(query)
-    requests = result.unique().scalars().all()
-    
-    responses = []
-    for req in requests:
-        response = ReturnApprovalRequestResponse.model_validate(req)
-        if req.patient:
-            response.patient_name = f"{req.patient.first_name} {req.patient.last_name}"
-        if req.doctor:
-            response.doctor_name = f"{req.doctor.first_name} {req.doctor.last_name}"
-        if req.requester:
-            response.requester_name = f"{req.requester.first_name} {req.requester.last_name}"
-        if req.approver:
-            response.approver_name = f"{req.approver.first_name} {req.approver.last_name}"
-        responses.append(response)
-    
-    return responses
-
-
-@router.patch("/return-approval-requests/{request_id}", response_model=ReturnApprovalRequestResponse)
-async def update_return_approval_request(
-    request_id: int,
-    update_data: ReturnApprovalRequestUpdate,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_session),
-):
-    """
-    Approve or reject a return approval request (doctors only)
-    """
-    # Only doctors can approve/reject
-    if current_user.role != UserRole.DOCTOR:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only doctors can approve or reject return approval requests"
-        )
-    
-    # Get the request
-    request_query = select(ReturnApprovalRequest).filter(
-        and_(
-            ReturnApprovalRequest.id == request_id,
-            ReturnApprovalRequest.clinic_id == current_user.clinic_id,
-            ReturnApprovalRequest.doctor_id == current_user.id
-        )
-    )
-    request_result = await db.execute(request_query)
-    approval_request = request_result.scalar_one_or_none()
-    
-    if not approval_request:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Approval request not found"
-        )
-    
-    if approval_request.status != ReturnApprovalStatus.PENDING:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Request is already {approval_request.status.value}"
-        )
-    
-    # Check if expired
-    from datetime import timezone
-    if approval_request.expires_at and approval_request.expires_at < datetime.datetime.now(timezone.utc):
-        approval_request.status = ReturnApprovalStatus.EXPIRED
-        await db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This approval request has expired"
-        )
-    
-    # Update status
-    new_status = ReturnApprovalStatus(update_data.status)
-    approval_request.status = new_status
-    approval_request.approved_by = current_user.id
-    approval_request.approval_notes = update_data.approval_notes
-    approval_request.reviewed_at = datetime.datetime.now(timezone.utc)
-    
-    # If approved, create the appointment
-    if new_status == ReturnApprovalStatus.APPROVED:
-        appointment = Appointment(
-            patient_id=approval_request.patient_id,
-            doctor_id=approval_request.doctor_id,
-            clinic_id=approval_request.clinic_id,
-            scheduled_datetime=approval_request.requested_appointment_date,
-            appointment_type=approval_request.appointment_type,
-            notes=approval_request.notes,
-            status=AppointmentStatus.SCHEDULED
-        )
-        db.add(appointment)
-        await db.flush()
-        approval_request.resulting_appointment_id = appointment.id
-    
-    await db.commit()
-    await db.refresh(approval_request)
-    
-    # Load relationships
-    await db.refresh(approval_request, ["patient", "doctor", "requester", "approver"])
-    
-    response = ReturnApprovalRequestResponse.model_validate(approval_request)
-    if approval_request.patient:
-        response.patient_name = f"{approval_request.patient.first_name} {approval_request.patient.last_name}"
-    if approval_request.doctor:
-        response.doctor_name = f"{approval_request.doctor.first_name} {approval_request.doctor.last_name}"
-    if approval_request.requester:
-        response.requester_name = f"{approval_request.requester.first_name} {approval_request.requester.last_name}"
-    if approval_request.approver:
-        response.approver_name = f"{approval_request.approver.first_name} {approval_request.approver.last_name}"
-    
-    return response
 

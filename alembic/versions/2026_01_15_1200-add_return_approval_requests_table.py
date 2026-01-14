@@ -29,53 +29,58 @@ def upgrade() -> None:
         END $$;
     """)
     
-    # Create return_approval_requests table
-    op.create_table(
-        'return_approval_requests',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('patient_id', sa.Integer(), nullable=False),
-        sa.Column('doctor_id', sa.Integer(), nullable=False),
-        sa.Column('clinic_id', sa.Integer(), nullable=False),
-        sa.Column('requested_appointment_date', sa.DateTime(timezone=True), nullable=False),
-        sa.Column('appointment_type', sa.String(length=100), nullable=False, server_default='retorno'),
-        sa.Column('notes', sa.Text(), nullable=True),
-        sa.Column('returns_count_this_month', sa.Integer(), nullable=False, server_default='0'),
-        sa.Column('status', sa.Enum('pending', 'approved', 'rejected', 'expired', name='returnapprovalstatus'), nullable=False, server_default='pending'),
-        sa.Column('requested_by', sa.Integer(), nullable=False),
-        sa.Column('approved_by', sa.Integer(), nullable=True),
-        sa.Column('approval_notes', sa.Text(), nullable=True),
-        sa.Column('resulting_appointment_id', sa.Integer(), nullable=True),
-        sa.Column('requested_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-        sa.Column('reviewed_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('expires_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(['patient_id'], ['patients.id'], ),
-        sa.ForeignKeyConstraint(['doctor_id'], ['users.id'], ),
-        sa.ForeignKeyConstraint(['clinic_id'], ['clinics.id'], ),
-        sa.ForeignKeyConstraint(['requested_by'], ['users.id'], ),
-        sa.ForeignKeyConstraint(['approved_by'], ['users.id'], ),
-        sa.ForeignKeyConstraint(['resulting_appointment_id'], ['appointments.id'], ),
-        sa.PrimaryKeyConstraint('id')
-    )
-    
-    # Create indexes
-    op.create_index(op.f('ix_return_approval_requests_id'), 'return_approval_requests', ['id'], unique=False)
-    op.create_index(op.f('ix_return_approval_requests_patient_id'), 'return_approval_requests', ['patient_id'], unique=False)
-    op.create_index(op.f('ix_return_approval_requests_doctor_id'), 'return_approval_requests', ['doctor_id'], unique=False)
-    op.create_index(op.f('ix_return_approval_requests_clinic_id'), 'return_approval_requests', ['clinic_id'], unique=False)
-    op.create_index(op.f('ix_return_approval_requests_status'), 'return_approval_requests', ['status'], unique=False)
-    op.create_index(op.f('ix_return_approval_requests_resulting_appointment_id'), 'return_approval_requests', ['resulting_appointment_id'], unique=False)
+    # Check if table already exists before creating
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'return_approval_requests'
+            ) THEN
+                CREATE TABLE return_approval_requests (
+                    id SERIAL PRIMARY KEY,
+                    patient_id INTEGER NOT NULL,
+                    doctor_id INTEGER NOT NULL,
+                    clinic_id INTEGER NOT NULL,
+                    requested_appointment_date TIMESTAMP WITH TIME ZONE NOT NULL,
+                    appointment_type VARCHAR(100) NOT NULL DEFAULT 'retorno',
+                    notes TEXT,
+                    returns_count_this_month INTEGER NOT NULL DEFAULT 0,
+                    status returnapprovalstatus NOT NULL DEFAULT 'pending',
+                    requested_by INTEGER NOT NULL,
+                    approved_by INTEGER,
+                    approval_notes TEXT,
+                    resulting_appointment_id INTEGER,
+                    requested_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    reviewed_at TIMESTAMP WITH TIME ZONE,
+                    expires_at TIMESTAMP WITH TIME ZONE,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE,
+                    CONSTRAINT fk_return_approval_requests_patient FOREIGN KEY (patient_id) REFERENCES patients(id),
+                    CONSTRAINT fk_return_approval_requests_doctor FOREIGN KEY (doctor_id) REFERENCES users(id),
+                    CONSTRAINT fk_return_approval_requests_clinic FOREIGN KEY (clinic_id) REFERENCES clinics(id),
+                    CONSTRAINT fk_return_approval_requests_requested_by FOREIGN KEY (requested_by) REFERENCES users(id),
+                    CONSTRAINT fk_return_approval_requests_approved_by FOREIGN KEY (approved_by) REFERENCES users(id),
+                    CONSTRAINT fk_return_approval_requests_appointment FOREIGN KEY (resulting_appointment_id) REFERENCES appointments(id)
+                );
+                
+                CREATE INDEX ix_return_approval_requests_id ON return_approval_requests(id);
+                CREATE INDEX ix_return_approval_requests_patient_id ON return_approval_requests(patient_id);
+                CREATE INDEX ix_return_approval_requests_doctor_id ON return_approval_requests(doctor_id);
+                CREATE INDEX ix_return_approval_requests_clinic_id ON return_approval_requests(clinic_id);
+                CREATE INDEX ix_return_approval_requests_status ON return_approval_requests(status);
+                CREATE INDEX ix_return_approval_requests_resulting_appointment_id ON return_approval_requests(resulting_appointment_id);
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:
-    op.drop_index(op.f('ix_return_approval_requests_resulting_appointment_id'), table_name='return_approval_requests')
-    op.drop_index(op.f('ix_return_approval_requests_status'), table_name='return_approval_requests')
-    op.drop_index(op.f('ix_return_approval_requests_clinic_id'), table_name='return_approval_requests')
-    op.drop_index(op.f('ix_return_approval_requests_doctor_id'), table_name='return_approval_requests')
-    op.drop_index(op.f('ix_return_approval_requests_patient_id'), table_name='return_approval_requests')
-    op.drop_index(op.f('ix_return_approval_requests_id'), table_name='return_approval_requests')
-    op.drop_table('return_approval_requests')
-    
-    # Drop enum
+    op.execute("DROP INDEX IF EXISTS ix_return_approval_requests_resulting_appointment_id")
+    op.execute("DROP INDEX IF EXISTS ix_return_approval_requests_status")
+    op.execute("DROP INDEX IF EXISTS ix_return_approval_requests_clinic_id")
+    op.execute("DROP INDEX IF EXISTS ix_return_approval_requests_doctor_id")
+    op.execute("DROP INDEX IF EXISTS ix_return_approval_requests_patient_id")
+    op.execute("DROP INDEX IF EXISTS ix_return_approval_requests_id")
+    op.execute("DROP TABLE IF EXISTS return_approval_requests")
     op.execute("DROP TYPE IF EXISTS returnapprovalstatus")
