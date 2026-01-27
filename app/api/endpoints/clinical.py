@@ -1,6 +1,7 @@
 """
 Clinical records, prescriptions, and exam requests API endpoints
 """
+import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -502,56 +503,92 @@ async def get_patient_clinical_history(
     Get a patient's complete clinical history
     Returns all appointments with their clinical records, prescriptions, and exam requests
     """
-    # Verify patient exists and belongs to current clinic
-    patient_query = select(Patient).filter(
-        Patient.id == patient_id,
-        Patient.clinic_id == current_user.clinic_id
-    )
-    patient_result = await db.execute(patient_query)
-    patient = patient_result.scalar_one_or_none()
-    
-    if not patient:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Patient not found"
+    try:
+        # Verify patient exists and belongs to current clinic
+        patient_query = select(Patient).filter(
+            Patient.id == patient_id,
+            Patient.clinic_id == current_user.clinic_id
         )
-    
-    # Get all appointments with clinical records
-    appointments_query = select(Appointment, User, ClinicalRecord).join(
-        User, Appointment.doctor_id == User.id
-    ).outerjoin(
-        ClinicalRecord, Appointment.id == ClinicalRecord.appointment_id
-    ).filter(
-        Appointment.patient_id == patient_id,
-        Appointment.clinic_id == current_user.clinic_id
-    ).order_by(Appointment.scheduled_datetime.desc())
-    
-    appointments_result = await db.execute(appointments_query)
-    appointments_data = appointments_result.all()
-    
-    history = []
-    for appointment, doctor, clinical_record in appointments_data:
-        # Load prescriptions and exam requests if clinical record exists
-        clinical_record_detail = None
-        if clinical_record:
-            # Reload with relationships
-            record_query = select(ClinicalRecord).options(
-                joinedload(ClinicalRecord.prescriptions),
-                joinedload(ClinicalRecord.exam_requests),
-                joinedload(ClinicalRecord.diagnoses)
-            ).filter(ClinicalRecord.id == clinical_record.id)
-            record_result = await db.execute(record_query)
-            clinical_record_detail = record_result.scalar_one()
+        patient_result = await db.execute(patient_query)
+        patient = patient_result.scalar_one_or_none()
         
-        history.append(PatientClinicalHistoryResponse(
-            appointment_id=appointment.id,
-            appointment_date=appointment.scheduled_datetime,
-            doctor_name=f"{doctor.first_name} {doctor.last_name}",
-            appointment_type=appointment.appointment_type,
-            clinical_record=ClinicalRecordDetailResponse.model_validate(clinical_record_detail) if clinical_record_detail else None
-        ))
-    
-    return history
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Get all appointments with clinical records
+        appointments_query = select(Appointment, User, ClinicalRecord).join(
+            User, Appointment.doctor_id == User.id
+        ).outerjoin(
+            ClinicalRecord, Appointment.id == ClinicalRecord.appointment_id
+        ).filter(
+            Appointment.patient_id == patient_id,
+            Appointment.clinic_id == current_user.clinic_id
+        ).order_by(Appointment.scheduled_datetime.desc())
+        
+        appointments_result = await db.execute(appointments_query)
+        appointments_data = appointments_result.all()
+        
+        history = []
+        for appointment, doctor, clinical_record in appointments_data:
+            try:
+                # Load prescriptions and exam requests if clinical record exists
+                clinical_record_detail = None
+                if clinical_record:
+                    try:
+                        # Reload with relationships
+                        record_query = select(ClinicalRecord).options(
+                            joinedload(ClinicalRecord.prescriptions),
+                            joinedload(ClinicalRecord.exam_requests),
+                            joinedload(ClinicalRecord.diagnoses)
+                        ).filter(ClinicalRecord.id == clinical_record.id)
+                        record_result = await db.execute(record_query)
+                        clinical_record_detail = record_result.scalar_one_or_none()
+                    except Exception as e:
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"Error loading clinical record {clinical_record.id}: {str(e)}")
+                        clinical_record_detail = None
+                
+                # Convert status enum to string value
+                status_value = appointment.status.value if appointment.status else None
+                
+                # Build clinical record response if exists
+                clinical_record_response = None
+                if clinical_record_detail:
+                    try:
+                        clinical_record_response = ClinicalRecordDetailResponse.model_validate(clinical_record_detail)
+                    except Exception as e:
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"Error validating clinical record {clinical_record_detail.id}: {str(e)}")
+                        clinical_record_response = None
+                
+                history.append(PatientClinicalHistoryResponse(
+                    appointment_id=appointment.id,
+                    appointment_date=appointment.scheduled_datetime,
+                    doctor_name=f"{doctor.first_name} {doctor.last_name}",
+                    patient_name=f"{patient.first_name} {patient.last_name}" if patient else None,
+                    appointment_type=appointment.appointment_type,
+                    status=status_value,
+                    clinical_record=clinical_record_response
+                ))
+            except Exception as e:
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error processing appointment {appointment.id}: {str(e)}")
+                # Continue with next appointment instead of failing completely
+                continue
+        
+        return history
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error loading patient clinical history: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao carregar histórico de consultas: {str(e)}"
+        )
 
 
 @router.get(

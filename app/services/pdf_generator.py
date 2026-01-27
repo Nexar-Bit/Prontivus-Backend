@@ -731,7 +731,31 @@ class PDFGenerator:
             # Build PDF
             doc.build(story)
             buffer.seek(0)
-            return buffer.getvalue()
+            pdf_bytes = buffer.getvalue()
+            
+            # Add digital signature if requested
+            if consultation_data.get('sign_digitally', False):
+                try:
+                    from app.services.digital_signature import DigitalSignatureService
+                    
+                    doctor = consultation_data.get('doctor', {})
+                    user_id = doctor.get('id')
+                    clinic_id = consultation_data.get('clinic', {}).get('id')
+                    
+                    cert_pem, key_pem = DigitalSignatureService.load_certificate_and_key(user_id, clinic_id)
+                    
+                    if cert_pem and key_pem:
+                        pdf_bytes = DigitalSignatureService.add_signature_to_pdf(
+                            pdf_bytes,
+                            cert_pem,
+                            key_pem,
+                            signature_reason="Consulta médica",
+                            signature_location=consultation_data.get('clinic', {}).get('name', 'Prontivus')
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to add digital signature to PDF: {e}")
+            
+            return pdf_bytes
             
         except Exception as e:
             raise Exception(f"PDF generation failed: {str(e)}")
@@ -912,28 +936,28 @@ class PDFGenerator:
         """Create SOAP notes content"""
         elements = []
         
-        # Subjective
+        # Anamnese (Subjective)
         if clinical_record.get('subjective'):
-            elements.append(Paragraph("<b>S - Subjetivo:</b>", self.styles['MedicalHeading']))
+            elements.append(Paragraph("<b>A - Anamnese:</b>", self.styles['MedicalHeading']))
             elements.append(Paragraph(clinical_record.get('subjective', ''), self.styles['MedicalBody']))
             elements.append(Spacer(1, 10))
         
-        # Objective
+        # Exame Físico (Objective)
         if clinical_record.get('objective'):
-            elements.append(Paragraph("<b>O - Objetivo:</b>", self.styles['MedicalHeading']))
+            elements.append(Paragraph("<b>E - Exame Físico:</b>", self.styles['MedicalHeading']))
             elements.append(Paragraph(clinical_record.get('objective', ''), self.styles['MedicalBody']))
             elements.append(Spacer(1, 10))
         
-        # Assessment
+        # Opinião da IA (Assessment)
         if clinical_record.get('assessment'):
-            elements.append(Paragraph("<b>A - Avaliação:</b>", self.styles['MedicalHeading']))
+            elements.append(Paragraph("<b>O - Opinião da IA:</b>", self.styles['MedicalHeading']))
             elements.append(Paragraph(clinical_record.get('assessment', ''), self.styles['MedicalBody']))
             elements.append(Spacer(1, 10))
         
-        # Plan
+        # Conduta (Plan)
         plan_text = clinical_record.get('plan_soap') or clinical_record.get('plan', '')
         if plan_text:
-            elements.append(Paragraph("<b>P - Plano:</b>", self.styles['MedicalHeading']))
+            elements.append(Paragraph("<b>C - Conduta:</b>", self.styles['MedicalHeading']))
             elements.append(Paragraph(plan_text, self.styles['MedicalBody']))
             elements.append(Spacer(1, 10))
         

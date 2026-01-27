@@ -719,3 +719,90 @@ async def start_voice_recording(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start voice recording: {str(e)}"
         )
+
+
+@router.post("/voice/save-telemedicine-recording")
+async def save_telemedicine_recording(
+    video_file: UploadFile = File(...),
+    appointment_id: int = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
+):
+    """
+    Save telemedicine video/audio recording
+    
+    Args:
+        video_file: Video file (WebM format with audio)
+        appointment_id: ID of the appointment
+        current_user: Current authenticated user
+        db: Database session
+    
+    Returns:
+        Recording information with file path
+    """
+    try:
+        import os
+        from pathlib import Path
+        
+        # Verify appointment exists and user has access
+        appointment_query = select(Appointment).where(
+            Appointment.id == appointment_id,
+            Appointment.clinic_id == current_user.clinic_id
+        )
+        appointment_result = await db.execute(appointment_query)
+        appointment = appointment_result.scalar_one_or_none()
+        
+        if not appointment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Appointment not found or access denied"
+            )
+        
+        # Create storage directory if it doesn't exist
+        storage_dir = Path("storage/telemedicine")
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate unique filename
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        filename = f"telemedicine_{appointment_id}_{timestamp}.webm"
+        file_path = storage_dir / filename
+        
+        # Save video file
+        video_data = await video_file.read()
+        with open(file_path, "wb") as f:
+            f.write(video_data)
+        
+        # Create voice session record to track the recording
+        session_id = str(uuid.uuid4())
+        voice_session = VoiceSession(
+            session_id=session_id,
+            user_id=current_user.id,
+            appointment_id=appointment_id,
+            encrypted_audio_data=b"",  # Video is stored separately
+            expires_at=datetime.utcnow() + timedelta(days=30)  # Keep for 30 days
+        )
+        
+        db.add(voice_session)
+        await db.commit()
+        await db.refresh(voice_session)
+        
+        logger.info(f"Telemedicine recording saved for appointment {appointment_id}: {file_path}")
+        
+        return {
+            "success": True,
+            "session_id": voice_session.session_id,
+            "appointment_id": appointment_id,
+            "file_path": str(file_path),
+            "file_size": len(video_data),
+            "message": "Telemedicine recording saved successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error saving telemedicine recording: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save telemedicine recording: {str(e)}"
+        )

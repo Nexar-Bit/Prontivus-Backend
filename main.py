@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback, document_signature, telemetry, online_payment
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback, document_signature, telemetry, online_payment, telemedicine
 from app.api.endpoints.tiss import (
     consultation_router, 
     sadt_router,
@@ -360,6 +360,7 @@ app.include_router(telemetry.router, prefix=API_V1_PREFIX, tags=["Telemetry"])
 app.include_router(online_payment.router, prefix=API_V1_PREFIX, tags=["Online Payments"])
 app.include_router(ai_diagnosis.router, prefix=API_V1_PREFIX, tags=["AI Diagnosis"])
 app.include_router(feedback.router, prefix=API_V1_PREFIX, tags=["Feedback"])
+app.include_router(telemedicine.router, prefix=API_V1_PREFIX, tags=["Telemedicine"])
 
 # Legacy /api routes for backward compatibility (deprecated)
 # TODO: Remove in v2.0.0

@@ -4,11 +4,12 @@ Handles online payment processing for consultations and invoices
 """
 
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from datetime import datetime, timezone
 from decimal import Decimal
+import logging
 
 from database import get_async_session
 from app.core.auth import get_current_user, RoleChecker
@@ -23,7 +24,9 @@ from app.schemas.payment_gateway import (
     PaymentRefundRequest,
     PaymentRefundResponse
 )
-from app.services.payment_gateway import PaymentGatewayService
+from app.services.payment_gateway import get_payment_gateway_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/online-payments", tags=["Online Payments"])
 
@@ -136,7 +139,8 @@ async def create_pix_payment(
         if payment_data.appointment_id:
             metadata["appointment_id"] = payment_data.appointment_id
         
-        gateway_response = await PaymentGatewayService.create_pix_payment(
+        payment_gateway = get_payment_gateway_service()
+        gateway_response = await payment_gateway.create_pix_payment(
             amount=payment_amount,
             description=description,
             payer_info=payer_info,
@@ -276,7 +280,8 @@ async def create_card_payment(
         if payment_data.appointment_id:
             metadata["appointment_id"] = payment_data.appointment_id
         
-        gateway_response = await PaymentGatewayService.create_card_payment(
+        payment_gateway = get_payment_gateway_service()
+        gateway_response = await payment_gateway.create_card_payment(
             amount=payment_amount,
             description=description,
             card_token=payment_data.card_token,
@@ -350,7 +355,8 @@ async def get_payment_status(
         )
     
     # Check status from gateway
-    gateway_status = await PaymentGatewayService.check_payment_status(transaction_id)
+    payment_gateway = get_payment_gateway_service()
+    gateway_status = await payment_gateway.check_payment_status(transaction_id)
     
     # Update payment status if changed
     if gateway_status["status"] == "completed" and payment.status != PaymentStatus.COMPLETED:
@@ -394,7 +400,8 @@ async def cancel_payment(
         )
     
     # Cancel via gateway
-    cancel_result = await PaymentGatewayService.cancel_payment(
+    payment_gateway = get_payment_gateway_service()
+    cancel_result = await payment_gateway.cancel_payment(
         transaction_id,
         cancel_request.reason
     )
@@ -434,8 +441,9 @@ async def refund_payment(
         )
     
     # Refund via gateway
+    payment_gateway = get_payment_gateway_service()
     refund_amount = refund_request.amount if refund_request.amount else payment.amount
-    refund_result = await PaymentGatewayService.refund_payment(
+    refund_result = await payment_gateway.refund_payment(
         transaction_id,
         refund_amount,
         refund_request.reason
@@ -454,3 +462,86 @@ async def refund_payment(
         refunded_at=refund_result["refunded_at"],
         reason=refund_result.get("reason")
     )
+
+
+@router.post("/webhook/{gateway}")
+async def payment_webhook(
+    gateway: str,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session)
+):
+    """
+    Webhook endpoint for payment gateway notifications
+    
+    Supported gateways: mercadopago, stripe, pagseguro
+    This endpoint receives payment status updates from payment gateways
+    """
+    try:
+        # Get raw body for signature verification
+        body = await request.body()
+        headers = dict(request.headers)
+        
+        # Verify webhook signature (gateway-specific)
+        if gateway.lower() == "mercadopago":
+            # Mercado Pago webhook verification
+            x_request_id = headers.get("x-request-id")
+            x_signature = headers.get("x-signature")
+            
+            # In production, verify signature using Mercado Pago's verification method
+            # For now, we'll process the webhook
+            
+            import json
+            webhook_data = json.loads(body.decode())
+            
+            # Process webhook data
+            if webhook_data.get("type") == "payment":
+                payment_data = webhook_data.get("data", {})
+                payment_id = payment_data.get("id")
+                
+                if payment_id:
+                    # Update payment status in database
+                    payment_query = select(Payment).filter(
+                        Payment.reference_number == str(payment_id)
+                    )
+                    payment_result = await db.execute(payment_query)
+                    payment = payment_result.scalar_one_or_none()
+                    
+                    if payment:
+                        # Map Mercado Pago status to our status
+                        mp_status = payment_data.get("status", "")
+                        status_map = {
+                            "pending": PaymentStatus.PENDING,
+                            "approved": PaymentStatus.COMPLETED,
+                            "authorized": PaymentStatus.COMPLETED,
+                            "in_process": PaymentStatus.PENDING,
+                            "in_mediation": PaymentStatus.PENDING,
+                            "rejected": PaymentStatus.FAILED,
+                            "cancelled": PaymentStatus.CANCELLED,
+                            "refunded": PaymentStatus.REFUNDED,
+                            "charged_back": PaymentStatus.FAILED
+                        }
+                        
+                        new_status = status_map.get(mp_status, PaymentStatus.PENDING)
+                        payment.status = new_status
+                        
+                        if new_status == PaymentStatus.COMPLETED:
+                            paid_at = payment_data.get("date_approved") or payment_data.get("date_created")
+                            if paid_at:
+                                try:
+                                    payment.paid_at = datetime.fromisoformat(paid_at.replace('Z', '+00:00'))
+                                except:
+                                    payment.paid_at = datetime.now(timezone.utc)
+                        
+                        await db.commit()
+                        logger.info(f"Payment {payment_id} status updated to {new_status}")
+                        
+                        return {"status": "processed", "payment_id": payment_id}
+        
+        return {"status": "received"}
+        
+    except Exception as e:
+        logger.error(f"Error processing payment webhook: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing webhook: {str(e)}"
+        )

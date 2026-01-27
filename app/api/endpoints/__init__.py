@@ -1,2 +1,2 @@
 # API Endpoints
-from . import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, user_settings, tiss_config, messages, ai_config, fiscal_config, reports, doctor_dashboard, document_signature, telemetry, online_payment
+from . import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, user_settings, tiss_config, messages, ai_config, fiscal_config, reports, doctor_dashboard, document_signature, telemetry, online_payment, telemedicine

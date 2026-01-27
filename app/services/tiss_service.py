@@ -18,6 +18,8 @@ from app.models.tiss import (
     TUSS_TABLE_MAPPING, TUSS_CODE_MAPPING
 )
 from app.services.tiss_validator import validate_tiss_document
+from app.services.tiss.xsd_validator import XSDValidator
+from app.services.tiss.versioning import TISSVersioningService
 from app.models import Invoice, InvoiceLine, ServiceItem, Patient, User, Clinic, Appointment
 from app.core.auth import get_current_user
 
@@ -267,121 +269,143 @@ async def _build_tiss_document(invoice: Invoice) -> TISSDocumento:
 
 
 def _tiss_to_xml(tiss_doc: TISSDocumento) -> str:
-    """Convert TISS document to XML string"""
+    """Convert TISS document to XML string according to ANS TISS 3.05.02 specifications"""
     import xml.etree.ElementTree as ET
     from xml.dom import minidom
     
-    # Create root element
-    root = ET.Element("tiss")
-    root.set("xmlns", "http://www.ans.gov.br/padroes/tiss/schemas")
+    # Determine namespace based on version
+    version = tiss_doc.versao_tiss or "3.05.02"
+    if version.startswith("3.05"):
+        namespace = "http://www.ans.gov.br/padroes/tiss/schemas"
+        schema_location = "http://www.ans.gov.br/padroes/tiss/schemas http://www.ans.gov.br/padroes/tiss/schemas/tissV3_05_02.xsd"
+    elif version.startswith("3.03"):
+        namespace = "http://www.ans.gov.br/padroes/tiss/schemas"
+        schema_location = "http://www.ans.gov.br/padroes/tiss/schemas http://www.ans.gov.br/padroes/tiss/schemas/tissV3_03_00.xsd"
+    else:
+        namespace = "http://www.ans.gov.br/padroes/tiss/schemas"
+        schema_location = "http://www.ans.gov.br/padroes/tiss/schemas http://www.ans.gov.br/padroes/tiss/schemas/tissV3_05_02.xsd"
+    
+    # Create root element with proper namespace
+    root = ET.Element("ans:mensagemTISS")
+    root.set("xmlns:ans", namespace)
     root.set("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
-    root.set("xsi:schemaLocation", "http://www.ans.gov.br/padroes/tiss/schemas http://www.ans.gov.br/padroes/tiss/schemas/tissV3_03_00.xsd")
+    root.set("xsi:schemaLocation", schema_location)
     
-    # Add version
-    versao = ET.SubElement(root, "versao")
-    versao.text = tiss_doc.versao_tiss
+    # Add header (cabecalho)
+    cabecalho = ET.SubElement(root, "ans:cabecalho")
+    versao_padrao = ET.SubElement(cabecalho, "ans:versaoPadrao")
+    versao_padrao.text = version
     
-    # Add lote
-    lote_elem = ET.SubElement(root, "lote")
+    # Add prestadorParaOperadora
+    prestador_para_operadora = ET.SubElement(root, "ans:prestadorParaOperadora")
+    
+    # Add loteGuias
+    lote_guias = ET.SubElement(prestador_para_operadora, "ans:loteGuias")
     
     # Lote info
-    numero_lote = ET.SubElement(lote_elem, "numeroLote")
+    numero_lote = ET.SubElement(lote_guias, "ans:numeroLote")
     numero_lote.text = tiss_doc.lote.numero_lote
     
-    data_envio = ET.SubElement(lote_elem, "dataEnvio")
+    data_envio = ET.SubElement(lote_guias, "ans:dataEnvio")
     data_envio.text = tiss_doc.lote.data_envio
     
-    # Guias
-    guias_elem = ET.SubElement(lote_elem, "guias")
+    if tiss_doc.lote.hora_envio:
+        hora_envio = ET.SubElement(lote_guias, "ans:horaEnvio")
+        hora_envio.text = tiss_doc.lote.hora_envio
+    
+    # GuiasTISS
+    guias_tiss = ET.SubElement(lote_guias, "ans:guiasTISS")
     
     for guia in tiss_doc.lote.guias:
-        guia_elem = ET.SubElement(guias_elem, "guia")
+        # Determine guide type and create appropriate element
+        # For consultation guides, use guiaConsultaSolicitacao or guiaConsultaExecutada
+        guia_elem = ET.SubElement(guias_tiss, "ans:guiaConsultaExecutada")
         
         # Identificação
-        identificacao_elem = ET.SubElement(guia_elem, "identificacao")
+        identificacao_elem = ET.SubElement(guia_elem, "ans:identificacaoGuia")
         
-        # Prestador
-        prestador_elem = ET.SubElement(identificacao_elem, "prestador")
-        cnpj_prestador = ET.SubElement(prestador_elem, "cnpj")
+        # PrestadorExecutante
+        prestador_executante = ET.SubElement(identificacao_elem, "ans:prestadorExecutante")
+        cnpj_prestador = ET.SubElement(prestador_executante, "ans:cnpj")
         cnpj_prestador.text = guia.identificacao.prestador.cnpj
-        nome_prestador = ET.SubElement(prestador_elem, "nome")
+        nome_prestador = ET.SubElement(prestador_executante, "ans:nome")
         nome_prestador.text = guia.identificacao.prestador.nome
         if guia.identificacao.prestador.codigo_prestador:
-            codigo_prestador = ET.SubElement(prestador_elem, "codigoPrestador")
+            codigo_prestador = ET.SubElement(prestador_executante, "ans:codigoPrestadorNaOperadora")
             codigo_prestador.text = guia.identificacao.prestador.codigo_prestador
         
         # Operadora
-        operadora_elem = ET.SubElement(identificacao_elem, "operadora")
-        cnpj_operadora = ET.SubElement(operadora_elem, "cnpj")
+        operadora_elem = ET.SubElement(identificacao_elem, "ans:operadora")
+        cnpj_operadora = ET.SubElement(operadora_elem, "ans:cnpj")
         cnpj_operadora.text = guia.identificacao.operadora.cnpj
-        nome_operadora = ET.SubElement(operadora_elem, "nome")
+        nome_operadora = ET.SubElement(operadora_elem, "ans:nome")
         nome_operadora.text = guia.identificacao.operadora.nome
-        registro_ans = ET.SubElement(operadora_elem, "registroANS")
+        registro_ans = ET.SubElement(operadora_elem, "ans:registroANS")
         registro_ans.text = guia.identificacao.operadora.registro_ans
         
         # Beneficiário
-        beneficiario_elem = ET.SubElement(identificacao_elem, "beneficiario")
-        numero_carteira = ET.SubElement(beneficiario_elem, "numeroCarteira")
+        beneficiario_elem = ET.SubElement(identificacao_elem, "ans:beneficiario")
+        numero_carteira = ET.SubElement(beneficiario_elem, "ans:numeroCarteira")
         numero_carteira.text = guia.identificacao.beneficiario.numero_carteira
-        nome_beneficiario = ET.SubElement(beneficiario_elem, "nome")
+        nome_beneficiario = ET.SubElement(beneficiario_elem, "ans:nome")
         nome_beneficiario.text = guia.identificacao.beneficiario.nome
-        cpf_beneficiario = ET.SubElement(beneficiario_elem, "cpf")
+        cpf_beneficiario = ET.SubElement(beneficiario_elem, "ans:cpf")
         cpf_beneficiario.text = guia.identificacao.beneficiario.cpf
-        data_nascimento = ET.SubElement(beneficiario_elem, "dataNascimento")
+        data_nascimento = ET.SubElement(beneficiario_elem, "ans:dataNascimento")
         data_nascimento.text = guia.identificacao.beneficiario.data_nascimento
-        sexo = ET.SubElement(beneficiario_elem, "sexo")
+        sexo = ET.SubElement(beneficiario_elem, "ans:sexo")
         sexo.text = guia.identificacao.beneficiario.sexo
-        nome_plano = ET.SubElement(beneficiario_elem, "nomePlano")
+        nome_plano = ET.SubElement(beneficiario_elem, "ans:nomePlano")
         nome_plano.text = guia.identificacao.beneficiario.nome_plano
         
-        # Contratado
-        contratado_elem = ET.SubElement(identificacao_elem, "contratado")
-        cpf_contratado = ET.SubElement(contratado_elem, "cpf")
+        # ContratadoExecutante
+        contratado_executante = ET.SubElement(identificacao_elem, "ans:contratadoExecutante")
+        cpf_contratado = ET.SubElement(contratado_executante, "ans:cpf")
         cpf_contratado.text = guia.identificacao.contratado.cpf
-        nome_contratado = ET.SubElement(contratado_elem, "nome")
+        nome_contratado = ET.SubElement(contratado_executante, "ans:nome")
         nome_contratado.text = guia.identificacao.contratado.nome
-        cbo = ET.SubElement(contratado_elem, "cbo")
+        cbo = ET.SubElement(contratado_executante, "ans:cbo")
         cbo.text = guia.identificacao.contratado.cbo
         if guia.identificacao.contratado.crm:
-            crm = ET.SubElement(contratado_elem, "crm")
+            crm = ET.SubElement(contratado_executante, "ans:crm")
             crm.text = guia.identificacao.contratado.crm
         
         # Data emissão e número da guia
-        data_emissao = ET.SubElement(identificacao_elem, "dataEmissao")
+        data_emissao = ET.SubElement(identificacao_elem, "ans:dataEmissao")
         data_emissao.text = guia.identificacao.data_emissao
-        numero_guia = ET.SubElement(identificacao_elem, "numeroGuia")
+        numero_guia = ET.SubElement(identificacao_elem, "ans:numeroGuia")
         numero_guia.text = guia.identificacao.numero_guia
         
-        # Procedimentos
-        procedimentos_elem = ET.SubElement(guia_elem, "procedimentos")
+        # ProcedimentosExecutados
+        procedimentos_executados = ET.SubElement(guia_elem, "ans:procedimentosExecutados")
         
         for procedimento in guia.procedimentos.procedimentos:
-            procedimento_elem = ET.SubElement(procedimentos_elem, "procedimento")
+            procedimento_elem = ET.SubElement(procedimentos_executados, "ans:procedimentoExecutado")
             
-            codigo_tabela = ET.SubElement(procedimento_elem, "codigoTabela")
+            codigo_tabela = ET.SubElement(procedimento_elem, "ans:codigoTabela")
             codigo_tabela.text = procedimento.codigo_tabela
-            codigo_procedimento = ET.SubElement(procedimento_elem, "codigoProcedimento")
+            codigo_procedimento = ET.SubElement(procedimento_elem, "ans:codigoProcedimento")
             codigo_procedimento.text = procedimento.codigo_procedimento
-            descricao_procedimento = ET.SubElement(procedimento_elem, "descricaoProcedimento")
+            descricao_procedimento = ET.SubElement(procedimento_elem, "ans:descricaoProcedimento")
             descricao_procedimento.text = procedimento.descricao_procedimento
-            quantidade_executada = ET.SubElement(procedimento_elem, "quantidadeExecutada")
+            quantidade_executada = ET.SubElement(procedimento_elem, "ans:quantidadeExecutada")
             quantidade_executada.text = str(procedimento.quantidade_executada)
-            valor_unitario = ET.SubElement(procedimento_elem, "valorUnitario")
-            valor_unitario.text = str(procedimento.valor_unitario)
-            valor_total = ET.SubElement(procedimento_elem, "valorTotal")
-            valor_total.text = str(procedimento.valor_total)
-            data_execucao = ET.SubElement(procedimento_elem, "dataExecucao")
+            valor_unitario = ET.SubElement(procedimento_elem, "ans:valorUnitario")
+            valor_unitario.text = f"{procedimento.valor_unitario:.2f}"
+            valor_total = ET.SubElement(procedimento_elem, "ans:valorTotal")
+            valor_total.text = f"{procedimento.valor_total:.2f}"
+            data_execucao = ET.SubElement(procedimento_elem, "ans:dataExecucao")
             data_execucao.text = procedimento.data_execucao
             if procedimento.hora_inicio:
-                hora_inicio = ET.SubElement(procedimento_elem, "horaInicio")
+                hora_inicio = ET.SubElement(procedimento_elem, "ans:horaInicio")
                 hora_inicio.text = procedimento.hora_inicio
             if procedimento.hora_fim:
-                hora_fim = ET.SubElement(procedimento_elem, "horaFim")
+                hora_fim = ET.SubElement(procedimento_elem, "ans:horaFim")
                 hora_fim.text = procedimento.hora_fim
         
-        # Valor total da guia
-        valor_total_guia = ET.SubElement(guia_elem, "valorTotalGuia")
-        valor_total_guia.text = str(guia.valor_total_guia)
+        # ValorTotal
+        valor_total_guia = ET.SubElement(guia_elem, "ans:valorTotal")
+        valor_total_guia.text = f"{guia.valor_total_guia:.2f}"
     
     # Convert to pretty XML
     rough_string = ET.tostring(root, encoding='utf-8')
