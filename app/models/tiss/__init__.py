@@ -13,6 +13,13 @@ from .attachment import TISSAttachment
 from .tuss import TUSSCode, TUSSVersionHistory
 from .version import TISSVersion
 from .audit_log import TISSAuditLog
+from .insurance_structure import (
+    InsuranceCompany,
+    InsurancePlanTISS,
+    TUSSPlanCoverage,
+    TUSSLoadHistory,
+)
+from .preauth_guide import TISSPreAuthGuide, PreAuthGuideStatus, PreAuthGuideSubmissionStatus
 
 __all__ = [
     'TISSConsultationGuide',
@@ -26,5 +33,12 @@ __all__ = [
     'TUSSVersionHistory',
     'TISSVersion',
     'TISSAuditLog',
+    'InsuranceCompany',
+    'InsurancePlanTISS',
+    'TUSSPlanCoverage',
+    'TUSSLoadHistory',
+    'TISSPreAuthGuide',
+    'PreAuthGuideStatus',
+    'PreAuthGuideSubmissionStatus',
 ]
 

@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback, document_signature, telemetry, online_payment, telemedicine
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, websocket_messages, notifications, user_settings, tiss_config, messages, menu, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support, documents, ai_diagnosis, feedback, document_signature, telemetry, online_payment, telemedicine, ai_analysis, return_visits, s3_reports
 from app.api.endpoints.tiss import (
     consultation_router, 
     sadt_router,
@@ -34,7 +34,9 @@ from app.api.endpoints.tiss import (
     individual_fee_router,
     batch_router, 
     tuss_router, 
-    submission_router
+    submission_router,
+    insurance_structure_router,
+    preauth_router
 )
 from app.api.endpoints import icd10
 
@@ -327,6 +329,8 @@ app.include_router(individual_fee_router, prefix=API_V1_PREFIX)
 app.include_router(batch_router, prefix=API_V1_PREFIX)
 app.include_router(tuss_router, prefix=API_V1_PREFIX)
 app.include_router(submission_router, prefix=API_V1_PREFIX)
+app.include_router(insurance_structure_router, prefix=API_V1_PREFIX)
+app.include_router(preauth_router, prefix=API_V1_PREFIX)
 app.include_router(stock.router, prefix=API_V1_PREFIX, tags=["Stock"])
 app.include_router(procedures.router, prefix=API_V1_PREFIX, tags=["Procedures"])
 app.include_router(analytics.router, prefix=API_V1_PREFIX, tags=["Analytics"])
@@ -359,8 +363,11 @@ app.include_router(document_signature.router, prefix=API_V1_PREFIX, tags=["Docum
 app.include_router(telemetry.router, prefix=API_V1_PREFIX, tags=["Telemetry"])
 app.include_router(online_payment.router, prefix=API_V1_PREFIX, tags=["Online Payments"])
 app.include_router(ai_diagnosis.router, prefix=API_V1_PREFIX, tags=["AI Diagnosis"])
+app.include_router(ai_analysis.router, prefix=API_V1_PREFIX, tags=["AI Analysis"])
 app.include_router(feedback.router, prefix=API_V1_PREFIX, tags=["Feedback"])
 app.include_router(telemedicine.router, prefix=API_V1_PREFIX, tags=["Telemedicine"])
+app.include_router(return_visits.router, prefix=API_V1_PREFIX, tags=["Return Visits"])
+app.include_router(s3_reports.router, prefix=API_V1_PREFIX, tags=["S3 Reports"])
 
 # Legacy /api routes for backward compatibility (deprecated)
 # TODO: Remove in v2.0.0

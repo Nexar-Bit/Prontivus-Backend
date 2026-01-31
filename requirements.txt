@@ -18,6 +18,7 @@ email-validator==2.1.0
 bcrypt==4.0.1
 reportlab==4.2.5
 openpyxl==3.1.5
+pandas>=2.0.0
 phonenumbers==8.13.31
 aiohttp==3.9.1
 httpx==0.26.0

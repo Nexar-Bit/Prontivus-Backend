@@ -318,6 +318,9 @@ from app.models.entitlement import Entitlement, ModuleName, LimitType
 # Import return approval models
 from app.models.return_approval import ReturnApprovalRequest, ReturnApprovalStatus
 
+# Import return visit config models
+from app.models.return_visit_config import ReturnVisitConfig, ReturnVisitApproval
+
 # Import ICD-10 models
 from app.models.icd10 import ICD10Chapter, ICD10Group, ICD10Category, ICD10Subcategory, ICD10SearchIndex
 
@@ -347,6 +350,13 @@ from app.models.tiss import (
     TUSSVersionHistory,
     TISSVersion,
     TISSAuditLog,
+    InsuranceCompany,
+    InsurancePlanTISS,
+    TUSSPlanCoverage,
+    TUSSLoadHistory,
+    TISSPreAuthGuide,
+    PreAuthGuideStatus,
+    PreAuthGuideSubmissionStatus,
 )
 from app.models.system_log import SystemLog
 
@@ -460,5 +470,16 @@ __all__ = [
     "TicketPriority",
     "PasswordResetToken",
     "AIConfig",
+    "ReturnVisitConfig",
+    "ReturnVisitApproval",
+    "ReturnApprovalRequest",
+    "ReturnApprovalStatus",
+    "InsuranceCompany",
+    "InsurancePlanTISS",
+    "TUSSPlanCoverage",
+    "TUSSLoadHistory",
+    "TISSPreAuthGuide",
+    "PreAuthGuideStatus",
+    "PreAuthGuideSubmissionStatus",
 ]
 

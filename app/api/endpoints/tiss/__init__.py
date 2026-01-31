@@ -10,6 +10,8 @@ from .individual_fee import router as individual_fee_router
 from .batch import router as batch_router
 from .tuss import router as tuss_router
 from .submission import router as submission_router
+from .insurance_structure import router as insurance_structure_router
+from .preauth import router as preauth_router
 
 __all__ = [
     'consultation_router', 
@@ -18,6 +20,8 @@ __all__ = [
     'individual_fee_router',
     'batch_router', 
     'tuss_router', 
-    'submission_router'
+    'submission_router',
+    'insurance_structure_router',
+    'preauth_router',
 ]
 
